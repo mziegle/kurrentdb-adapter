@@ -4,11 +4,14 @@ import { MicroserviceOptions, Transport } from '@nestjs/microservices';
 import { join } from 'node:path';
 
 async function bootstrap() {
+  const grpcUrl = process.env.GRPC_URL ?? '0.0.0.0:2113';
+
   const app = await NestFactory.createMicroservice<MicroserviceOptions>(
     AppModule,
     {
       transport: Transport.GRPC,
       options: {
+        url: grpcUrl,
         package: 'event_store.client.streams',
         protoPath: join(__dirname, 'protos/streams.proto'),
       },

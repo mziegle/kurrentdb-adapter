@@ -1,8 +1,8 @@
 # kurrentdb-adapter
 
-`kurrentdb-adapter` is a NestJS gRPC service that exposes the EventStore/KurrentDB `Streams` protobuf contract and currently returns placeholder responses for early integration work.
+`kurrentdb-adapter` is a NestJS gRPC service that exposes the EventStore/KurrentDB `Streams` protobuf contract and persists stream events in PostgreSQL.
 
-It is best described as a mock or adapter skeleton, not a full KurrentDB-compatible implementation.
+It is still a partial adapter, not a full KurrentDB-compatible implementation.
 
 ## What It Does
 
@@ -10,6 +10,8 @@ It is best described as a mock or adapter skeleton, not a full KurrentDB-compati
 - Uses the `event_store.client.streams` protobuf package
 - Loads the service definition from `src/protos/streams.proto`
 - Generates TypeScript interfaces from protobuf files with `ts-proto`
+- Stores appended events in PostgreSQL
+- Reads persisted stream events back over gRPC
 - Exposes a partial implementation of the `Streams` service
 
 ## Current Status
@@ -17,9 +19,9 @@ It is best described as a mock or adapter skeleton, not a full KurrentDB-compati
 Implemented:
 
 - `Read`
-  Returns one synthetic event and completes the response stream.
+  Reads persisted events for a single stream from PostgreSQL.
 - `Append`
-  Accepts a client stream and returns a static success response.
+  Persists appended events transactionally in PostgreSQL and returns the resulting revision/position.
 
 Not implemented:
 
@@ -36,6 +38,8 @@ These methods currently throw `Method not implemented.` and should be treated as
 - NestJS microservices
 - gRPC
 - Protocol Buffers
+- PostgreSQL
+- `pg`
 - `ts-proto`
 
 ## Project Layout
@@ -63,6 +67,30 @@ test/
 
 ```bash
 npm install
+```
+
+### Configure PostgreSQL
+
+Use either `POSTGRES_URL` or the individual connection variables:
+
+```bash
+POSTGRES_URL=postgres://postgres:postgres@localhost:5432/kurrentdb_adapter
+```
+
+or
+
+```bash
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=kurrentdb_adapter
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+```
+
+The gRPC listener defaults to `0.0.0.0:2113`. Override it with:
+
+```bash
+GRPC_URL=0.0.0.0:2113
 ```
 
 ### Start in development
@@ -120,16 +148,14 @@ The adapter exposes the `Streams` gRPC service:
 
 ## Limitations
 
-- Responses are hard-coded placeholder values.
-- There is no persistence layer.
-- Stream revision and position handling are not real yet.
-- Runtime configuration via environment variables is not implemented.
+- Only stream-scoped reads are supported.
+- Filtered reads and subscription reads are not implemented.
+- `Delete`, `Tombstone`, and `BatchAppend` are still unimplemented.
+- Stream positions are backed by a simple Postgres global sequence, not full KurrentDB semantics.
 - End-to-end coverage is still minimal.
 
 ## Recommended Next Steps
 
-- add configurable gRPC host and port
-- implement real append/read behavior backed by storage
 - implement `Delete`, `Tombstone`, and `BatchAppend`
 - map gRPC errors to expected KurrentDB client behavior
 - expand integration tests with real client request flows

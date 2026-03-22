@@ -1,5 +1,9 @@
 import { Controller } from '@nestjs/common';
 import {
+  GrpcMethod,
+  GrpcStreamCall,
+} from '@nestjs/microservices';
+import {
   AppendReq,
   AppendResp,
   BatchAppendReq,
@@ -8,84 +12,72 @@ import {
   DeleteResp,
   ReadReq,
   ReadResp,
-  StreamsControllerMethods,
   TombstoneReq,
   TombstoneResp,
 } from './interfaces/streams';
-import { StreamsController as IStreamController } from './interfaces/streams';
 import { Observable } from 'rxjs';
-import { randomUUID } from 'node:crypto';
+import { PostgresEventStoreService } from './postgres-event-store.service';
+import { ServerReadableStream, sendUnaryData } from '@grpc/grpc-js';
 
 @Controller()
-@StreamsControllerMethods()
-export class StreamsController implements IStreamController {
+export class StreamsController {
+  constructor(private readonly eventStore: PostgresEventStoreService) {}
+
+  @GrpcMethod('Streams', 'read')
   read(request: ReadReq): Observable<ReadResp> {
-    console.log(request);
-
-    const o = new Observable<ReadResp>((subscriber) => {
-      const response: ReadResp = {
-        event: {
-          event: {
-            id: { string: randomUUID() },
-            data: new Uint8Array(),
-            commitPosition: 0,
-            streamIdentifier: { streamName: Buffer.from('sample-stream') },
-            streamRevision: 1,
-            customMetadata: new Uint8Array(),
-            metadata: {},
-            preparePosition: 0,
-          },
-          link: {
-            id: { string: randomUUID() },
-            data: new Uint8Array(),
-            commitPosition: 0,
-            streamIdentifier: { streamName: Buffer.from('sample-stream') },
-            streamRevision: 1,
-            customMetadata: new Uint8Array(),
-            metadata: {},
-            preparePosition: 0,
-          },
-        },
-      };
-      subscriber.next(response);
-      subscriber.complete();
+    return new Observable<ReadResp>((subscriber) => {
+      this.eventStore
+        .read(request)
+        .then((responses) => {
+          for (const response of responses) {
+            subscriber.next(response);
+          }
+          subscriber.complete();
+        })
+        .catch((error: unknown) => subscriber.error(error));
     });
-
-    return o;
   }
 
+  @GrpcStreamCall('Streams', 'append')
   append(
-    request: Observable<AppendReq>,
-  ): Promise<AppendResp> | Observable<AppendResp> | AppendResp {
-    console.log(request);
+    call: ServerReadableStream<AppendReq, AppendResp>,
+    callback: sendUnaryData<AppendResp>,
+  ): void {
+    const messages: AppendReq[] = [];
 
-    const o = new Observable<AppendResp>((subscriber) => {
-      const response: AppendResp = {
-        success: {
-          currentRevision: 1,
-        },
-      };
-      subscriber.next(response);
-      subscriber.complete();
+    call.on('data', (message) => {
+      messages.push(message);
     });
 
-    return o;
+    call.on('end', () => {
+      this.eventStore
+        .append(messages)
+        .then((response) => callback(null, response))
+        .catch((error: unknown) => callback(error as Error, null));
+    });
+
+    call.on('error', (error) => {
+      callback(error, null);
+    });
   }
 
+  @GrpcMethod('Streams', 'delete')
   delete(
     request: DeleteReq,
   ): Promise<DeleteResp> | Observable<DeleteResp> | DeleteResp {
     throw new Error('Method not implemented.');
   }
 
+  @GrpcMethod('Streams', 'tombstone')
   tombstone(
     request: TombstoneReq,
   ): Promise<TombstoneResp> | Observable<TombstoneResp> | TombstoneResp {
     throw new Error('Method not implemented.');
   }
 
+  @GrpcStreamCall('Streams', 'batchAppend')
   batchAppend(
-    request: Observable<BatchAppendReq>,
+    request: ServerReadableStream<BatchAppendReq, BatchAppendResp>,
   ): Observable<BatchAppendResp> {
     throw new Error('Method not implemented.');
   }
