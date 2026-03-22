@@ -201,4 +201,43 @@ describe('Streams', () => {
       streamName,
     });
   });
+
+  it('preserves event order when appending multiple events in one call', async () => {
+    const streamName = 'booking-batch';
+
+    const appendResult = await client.appendToStream(streamName, [
+      jsonEvent({
+        type: 'booking-created',
+        data: { step: 1 },
+      }),
+      jsonEvent({
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      }),
+      jsonEvent({
+        type: 'booking-completed',
+        data: { step: 3 },
+      }),
+    ]);
+
+    expect(appendResult).toMatchObject({
+      success: true,
+      nextExpectedRevision: 2n,
+    });
+
+    expect(await readStreamEvents(streamName)).toEqual([
+      {
+        type: 'booking-created',
+        data: { step: 1 },
+      },
+      {
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      },
+      {
+        type: 'booking-completed',
+        data: { step: 3 },
+      },
+    ]);
+  });
 });
