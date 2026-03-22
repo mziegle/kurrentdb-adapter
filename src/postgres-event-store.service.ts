@@ -8,6 +8,8 @@ import {
   DeleteResp,
   ReadReq,
   ReadResp,
+  TombstoneReq,
+  TombstoneResp,
 } from './interfaces/streams';
 
 type PersistedEventRow = {
@@ -25,6 +27,12 @@ type LongLike = {
   high: number;
   unsigned: boolean;
 };
+
+export class StreamDeletedServiceError extends Error {
+  constructor(readonly streamName: string) {
+    super(`Stream "${streamName}" is deleted.`);
+  }
+}
 
 @Injectable()
 export class PostgresEventStoreService
@@ -51,6 +59,14 @@ export class PostgresEventStoreService
       CREATE INDEX IF NOT EXISTS idx_stream_events_stream_revision
       ON stream_events (stream_name, stream_revision)
     `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS tombstoned_streams (
+        stream_name TEXT PRIMARY KEY,
+        tombstoned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_position BIGINT NOT NULL
+      )
+    `);
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -74,6 +90,8 @@ export class PostgresEventStoreService
     const streamName = this.decodeStreamName(
       options.streamIdentifier.streamName,
     );
+
+    await this.ensureStreamIsNotTombstoned(streamName);
 
     const client = await this.pool.connect();
     try {
@@ -167,6 +185,7 @@ export class PostgresEventStoreService
     const streamName = this.decodeStreamName(
       options.stream.streamIdentifier.streamName,
     );
+    await this.ensureStreamIsNotTombstoned(streamName);
     const exists = await this.streamExists(streamName);
     if (!exists) {
       return [
@@ -240,6 +259,7 @@ export class PostgresEventStoreService
     }
 
     const streamName = this.decodeStreamName(options.streamIdentifier.streamName);
+    await this.ensureStreamIsNotTombstoned(streamName);
     const client = await this.pool.connect();
 
     try {
@@ -276,6 +296,75 @@ export class PostgresEventStoreService
         (max, row) => Math.max(max, this.toNumber(row.global_position)),
         0,
       );
+
+      return {
+        position: {
+          commitPosition: lastPosition,
+          preparePosition: lastPosition,
+        },
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async tombstone(request: TombstoneReq): Promise<TombstoneResp> {
+    const options = request.options;
+    if (!options?.streamIdentifier?.streamName) {
+      throw new Error('Tombstone request is missing a stream identifier.');
+    }
+
+    const streamName = this.decodeStreamName(options.streamIdentifier.streamName);
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const alreadyTombstoned = await this.isStreamTombstoned(streamName, client);
+      if (alreadyTombstoned) {
+        await client.query('ROLLBACK');
+        throw new StreamDeletedServiceError(streamName);
+      }
+
+      const currentRevision = await this.getCurrentRevision(client, streamName);
+      const mismatch = this.getTombstoneExpectedVersionMismatch(
+        options,
+        currentRevision,
+        streamName,
+      );
+      if (mismatch) {
+        await client.query('ROLLBACK');
+        throw mismatch;
+      }
+
+      const deleted = await client.query<{ global_position: string | number }>(
+        `
+          DELETE FROM stream_events
+          WHERE stream_name = $1
+          RETURNING global_position
+        `,
+        [streamName],
+      );
+
+      const lastPosition = deleted.rows.reduce(
+        (max, row) => Math.max(max, this.toNumber(row.global_position)),
+        0,
+      );
+
+      await client.query(
+        `
+          INSERT INTO tombstoned_streams (stream_name, last_position)
+          VALUES ($1, $2)
+          ON CONFLICT (stream_name)
+          DO UPDATE SET last_position = EXCLUDED.last_position
+        `,
+        [streamName, lastPosition],
+      );
+
+      await client.query('COMMIT');
 
       return {
         position: {
@@ -340,6 +429,28 @@ export class PostgresEventStoreService
     return result.rows[0]?.exists ?? false;
   }
 
+  private async ensureStreamIsNotTombstoned(streamName: string): Promise<void> {
+    if (await this.isStreamTombstoned(streamName)) {
+      throw new StreamDeletedServiceError(streamName);
+    }
+  }
+
+  private async isStreamTombstoned(
+    streamName: string,
+    client: PoolClient | Pool = this.pool,
+  ): Promise<boolean> {
+    const result = await client.query<{ exists: boolean }>(
+      `
+        SELECT EXISTS(
+          SELECT 1 FROM tombstoned_streams WHERE stream_name = $1
+        ) AS exists
+      `,
+      [streamName],
+    );
+
+    return result.rows[0]?.exists ?? false;
+  }
+
   private getExpectedVersionMismatch(
     options: NonNullable<AppendReq['options']>,
     currentRevision: number | null,
@@ -376,6 +487,30 @@ export class PostgresEventStoreService
 
   private getDeleteExpectedVersionMismatch(
     options: NonNullable<DeleteReq['options']>,
+    currentRevision: number | null,
+    streamName: string,
+  ): Error | null {
+    const expectedRevision =
+      options.revision === undefined ? undefined : this.toNumber(options.revision);
+    const matches =
+      options.any !== undefined ||
+      (options.noStream !== undefined && currentRevision === null) ||
+      (options.streamExists !== undefined && currentRevision !== null) ||
+      (expectedRevision !== undefined && currentRevision === expectedRevision);
+
+    if (matches) {
+      return null;
+    }
+
+    return this.createWrongExpectedVersionError(
+      streamName,
+      expectedRevision,
+      currentRevision,
+    );
+  }
+
+  private getTombstoneExpectedVersionMismatch(
+    options: NonNullable<TombstoneReq['options']>,
     currentRevision: number | null,
     streamName: string,
   ): Error | null {

@@ -16,8 +16,16 @@ import {
   TombstoneResp,
 } from './interfaces/streams';
 import { Observable } from 'rxjs';
-import { PostgresEventStoreService } from './postgres-event-store.service';
-import { ServerReadableStream, sendUnaryData } from '@grpc/grpc-js';
+import {
+  PostgresEventStoreService,
+  StreamDeletedServiceError,
+} from './postgres-event-store.service';
+import {
+  Metadata,
+  ServerReadableStream,
+  sendUnaryData,
+  status,
+} from '@grpc/grpc-js';
 
 @Controller()
 export class StreamsController {
@@ -53,7 +61,9 @@ export class StreamsController {
       this.eventStore
         .append(messages)
         .then((response) => callback(null, response))
-        .catch((error: unknown) => callback(error as Error, null));
+        .catch((error: unknown) =>
+          callback(this.mapServiceError(error), null),
+        );
     });
 
     call.on('error', (error) => {
@@ -65,14 +75,18 @@ export class StreamsController {
   delete(
     request: DeleteReq,
   ): Promise<DeleteResp> | Observable<DeleteResp> | DeleteResp {
-    return this.eventStore.delete(request);
+    return this.eventStore.delete(request).catch((error: unknown) => {
+      throw this.mapServiceError(error);
+    });
   }
 
   @GrpcMethod('Streams', 'tombstone')
   tombstone(
     request: TombstoneReq,
   ): Promise<TombstoneResp> | Observable<TombstoneResp> | TombstoneResp {
-    throw new Error('Method not implemented.');
+    return this.eventStore.tombstone(request).catch((error: unknown) => {
+      throw this.mapServiceError(error);
+    });
   }
 
   @GrpcStreamCall('Streams', 'batchAppend')
@@ -80,5 +94,21 @@ export class StreamsController {
     request: ServerReadableStream<BatchAppendReq, BatchAppendResp>,
   ): Observable<BatchAppendResp> {
     throw new Error('Method not implemented.');
+  }
+
+  private mapServiceError(error: unknown): Error {
+    if (error instanceof StreamDeletedServiceError) {
+      const metadata = new Metadata();
+      metadata.set('exception', 'stream-deleted');
+      metadata.set('stream-name', error.streamName);
+
+      return Object.assign(new Error(`Stream "${error.streamName}" is deleted.`), {
+        code: status.UNKNOWN,
+        details: 'Stream deleted.',
+        metadata,
+      });
+    }
+
+    return error as Error;
   }
 }
