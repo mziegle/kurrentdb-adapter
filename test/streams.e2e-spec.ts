@@ -660,10 +660,13 @@ describe('Streams', () => {
   it('tombstones a stream and rejects subsequent appends as stream deleted', async () => {
     const streamName = 'booking-tombstone';
 
-    await client.appendToStream(streamName, jsonEvent({
-      type: 'booking-created',
-      data: { step: 1 },
-    }));
+    await client.appendToStream(
+      streamName,
+      jsonEvent({
+        type: 'booking-created',
+        data: { step: 1 },
+      }),
+    );
 
     const tombstoneResult = await client.tombstoneStream(streamName);
 

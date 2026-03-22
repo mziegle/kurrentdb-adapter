@@ -1,4 +1,5 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Metadata, status } from '@grpc/grpc-js';
 import { randomUUID } from 'node:crypto';
 import { Pool, PoolClient } from 'pg';
 import {
@@ -8,6 +9,7 @@ import {
   DeleteReq,
   DeleteResp,
   ReadReq,
+  ReadReq_Options_ReadDirection,
   ReadResp,
   TombstoneReq,
   TombstoneResp,
@@ -102,7 +104,10 @@ export class PostgresEventStoreService
       await client.query('BEGIN');
 
       const currentRevision = await this.getCurrentRevision(client, streamName);
-      const mismatch = this.getExpectedVersionMismatch(options, currentRevision);
+      const mismatch = this.getExpectedVersionMismatch(
+        options,
+        currentRevision,
+      );
       if (mismatch) {
         await client.query('ROLLBACK');
         return mismatch;
@@ -225,12 +230,18 @@ export class PostgresEventStoreService
       },
     };
 
-    let nextRevisionExclusive = await this.resolveSubscriptionBoundary(streamName, options);
+    let nextRevisionExclusive = await this.resolveSubscriptionBoundary(
+      streamName,
+      options,
+    );
     let caughtUp = false;
 
     while (!isCancelled()) {
       const versionBeforeRead = this.getStreamVersion(streamName);
-      const rows = await this.readSubscriptionRows(streamName, nextRevisionExclusive);
+      const rows = await this.readSubscriptionRows(
+        streamName,
+        nextRevisionExclusive,
+      );
 
       if (rows.length > 0) {
         for (const row of rows) {
@@ -260,7 +271,11 @@ export class PostgresEventStoreService
         continue;
       }
 
-      await this.waitForStreamUpdate(streamName, versionBeforeRead, isCancelled);
+      await this.waitForStreamUpdate(
+        streamName,
+        versionBeforeRead,
+        isCancelled,
+      );
     }
   }
 
@@ -270,7 +285,9 @@ export class PostgresEventStoreService
       throw new Error('Delete request is missing a stream identifier.');
     }
 
-    const streamName = this.decodeStreamName(options.streamIdentifier.streamName);
+    const streamName = this.decodeStreamName(
+      options.streamIdentifier.streamName,
+    );
     await this.ensureStreamIsNotTombstoned(streamName);
     const client = await this.pool.connect();
 
@@ -329,13 +346,18 @@ export class PostgresEventStoreService
       throw new Error('Tombstone request is missing a stream identifier.');
     }
 
-    const streamName = this.decodeStreamName(options.streamIdentifier.streamName);
+    const streamName = this.decodeStreamName(
+      options.streamIdentifier.streamName,
+    );
     const client = await this.pool.connect();
 
     try {
       await client.query('BEGIN');
 
-      const alreadyTombstoned = await this.isStreamTombstoned(streamName, client);
+      const alreadyTombstoned = await this.isStreamTombstoned(
+        streamName,
+        client,
+      );
       if (alreadyTombstoned) {
         await client.query('ROLLBACK');
         throw new StreamDeletedServiceError(streamName);
@@ -445,7 +467,8 @@ export class PostgresEventStoreService
       ];
     }
 
-    const limit = options.count !== undefined ? this.toNumber(options.count) : 100;
+    const limit =
+      options.count !== undefined ? this.toNumber(options.count) : 100;
     const isBackwards = this.isBackwardsRead(options.readDirection);
     const order = isBackwards ? 'DESC' : 'ASC';
     const comparator = isBackwards ? '<=' : '>=';
@@ -581,14 +604,17 @@ export class PostgresEventStoreService
     observedVersion: number,
     isCancelled: () => boolean,
   ): Promise<void> {
-    if (isCancelled() || this.getStreamVersion(streamName) !== observedVersion) {
+    if (
+      isCancelled() ||
+      this.getStreamVersion(streamName) !== observedVersion
+    ) {
       return Promise.resolve();
     }
 
     return new Promise((resolve) => {
-      const listeners = this.streamListeners.get(streamName) ?? new Set<() => void>();
+      const listeners =
+        this.streamListeners.get(streamName) ?? new Set<() => void>();
       let settled = false;
-      let interval: NodeJS.Timeout | undefined;
 
       const finish = () => {
         if (settled) {
@@ -596,9 +622,7 @@ export class PostgresEventStoreService
         }
 
         settled = true;
-        if (interval) {
-          clearInterval(interval);
-        }
+        clearInterval(interval);
 
         listeners.delete(finish);
         if (listeners.size === 0) {
@@ -611,8 +635,11 @@ export class PostgresEventStoreService
       listeners.add(finish);
       this.streamListeners.set(streamName, listeners);
 
-      interval = setInterval(() => {
-        if (isCancelled() || this.getStreamVersion(streamName) !== observedVersion) {
+      const interval = setInterval(() => {
+        if (
+          isCancelled() ||
+          this.getStreamVersion(streamName) !== observedVersion
+        ) {
           finish();
         }
       }, 100);
@@ -659,7 +686,9 @@ export class PostgresEventStoreService
     currentRevision: number | null,
   ): AppendResp | null {
     const expectedRevision =
-      options.revision === undefined ? undefined : this.toNumber(options.revision);
+      options.revision === undefined
+        ? undefined
+        : this.toNumber(options.revision);
     const matches =
       options.any !== undefined ||
       (options.noStream !== undefined && currentRevision === null) ||
@@ -694,7 +723,9 @@ export class PostgresEventStoreService
     streamName: string,
   ): Error | null {
     const expectedRevision =
-      options.revision === undefined ? undefined : this.toNumber(options.revision);
+      options.revision === undefined
+        ? undefined
+        : this.toNumber(options.revision);
     const matches =
       options.any !== undefined ||
       (options.noStream !== undefined && currentRevision === null) ||
@@ -718,7 +749,9 @@ export class PostgresEventStoreService
     streamName: string,
   ): Error | null {
     const expectedRevision =
-      options.revision === undefined ? undefined : this.toNumber(options.revision);
+      options.revision === undefined
+        ? undefined
+        : this.toNumber(options.revision);
     const matches =
       options.any !== undefined ||
       (options.noStream !== undefined && currentRevision === null) ||
@@ -775,9 +808,8 @@ export class PostgresEventStoreService
     const error = new Error('Wrong expected version.') as Error & {
       code?: number;
       details?: string;
-      metadata?: import('@grpc/grpc-js').Metadata;
+      metadata?: Metadata;
     };
-    const { Metadata, status } = require('@grpc/grpc-js') as typeof import('@grpc/grpc-js');
     const metadata = new Metadata();
     metadata.set('exception', 'wrong-expected-version');
     metadata.set('stream-name', streamName);
@@ -798,9 +830,9 @@ export class PostgresEventStoreService
     readDirection: NonNullable<ReadReq['options']>['readDirection'] | string,
   ): boolean {
     return (
-      readDirection === 1 ||
-      readDirection === 'Backwards' ||
-      readDirection === 'BACKWARDS'
+      readDirection === ReadReq_Options_ReadDirection.Backwards ||
+      (typeof readDirection === 'string' &&
+        (readDirection === 'Backwards' || readDirection === 'BACKWARDS'))
     );
   }
 

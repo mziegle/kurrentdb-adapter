@@ -30,6 +30,7 @@
 
 - Run e2e tests with Docker/Testcontainers available.
 - Inside this environment, `npm run test:e2e -- --runInBand` had to run outside the sandbox to access Docker.
+- Any code change should leave the repo lint-clean. Before finishing, run `npx eslint "src/**/*.ts" "test/**/*.ts"` and fix violations in touched code.
 
 - Prefer asserting behavior only through the Kurrent client interface in e2e tests.
 - Direct database assertions were removed on purpose.

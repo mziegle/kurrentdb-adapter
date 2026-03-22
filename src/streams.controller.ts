@@ -1,12 +1,8 @@
 import { Controller } from '@nestjs/common';
-import {
-  GrpcMethod,
-  GrpcStreamCall,
-} from '@nestjs/microservices';
+import { GrpcMethod, GrpcStreamCall } from '@nestjs/microservices';
 import {
   AppendReq,
   AppendResp,
-  BatchAppendReq,
   BatchAppendResp,
   DeleteReq,
   DeleteResp,
@@ -94,7 +90,7 @@ export class StreamsController {
   ): void {
     const messages: AppendReq[] = [];
 
-    call.on('data', (message) => {
+    call.on('data', (message: AppendReq) => {
       messages.push(message);
     });
 
@@ -102,9 +98,7 @@ export class StreamsController {
       this.eventStore
         .append(messages)
         .then((response) => callback(null, response))
-        .catch((error: unknown) =>
-          callback(this.mapServiceError(error), null),
-        );
+        .catch((error: unknown) => callback(this.mapServiceError(error), null));
     });
 
     call.on('error', (error) => {
@@ -131,9 +125,7 @@ export class StreamsController {
   }
 
   @GrpcStreamCall('Streams', 'batchAppend')
-  batchAppend(
-    request: ServerReadableStream<BatchAppendReq, BatchAppendResp>,
-  ): Observable<BatchAppendResp> {
+  batchAppend(): Observable<BatchAppendResp> {
     throw new Error('Method not implemented.');
   }
 
@@ -143,11 +135,14 @@ export class StreamsController {
       metadata.set('exception', 'stream-deleted');
       metadata.set('stream-name', error.streamName);
 
-      return Object.assign(new Error(`Stream "${error.streamName}" is deleted.`), {
-        code: status.UNKNOWN,
-        details: 'Stream deleted.',
-        metadata,
-      });
+      return Object.assign(
+        new Error(`Stream "${error.streamName}" is deleted.`),
+        {
+          code: status.UNKNOWN,
+          details: 'Stream deleted.',
+          metadata,
+        },
+      );
     }
 
     return error as Error;
