@@ -5,6 +5,7 @@ import {
   KurrentDBClient,
   FORWARDS,
   START,
+  StreamNotFoundError,
   jsonEvent,
 } from '@kurrent/kurrentdb-client';
 import {
@@ -182,5 +183,22 @@ describe('Streams', () => {
         data: { step: 2 },
       },
     ]);
+  });
+
+  it('returns stream not found when reading a missing stream', async () => {
+    const streamName = 'missing-stream';
+
+    let caughtError: unknown;
+    try {
+      await readStreamEvents(streamName);
+    } catch (error) {
+      caughtError = error;
+    }
+
+    expect(caughtError).toBeInstanceOf(StreamNotFoundError);
+    expect(caughtError).toMatchObject({
+      type: 'stream-not-found',
+      streamName,
+    });
   });
 });
