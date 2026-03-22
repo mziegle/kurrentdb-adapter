@@ -39,23 +39,7 @@ describe('Streams', () => {
       .start();
 
     process.env.POSTGRES_URL = pgContainer.getConnectionUri();
-
-    const moduleFixture: TestingModule = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleFixture.createNestMicroservice({
-      transport: Transport.GRPC,
-      options: {
-        package: 'event_store.client.streams',
-        protoPath: join(__dirname, '../src/protos/streams.proto'),
-        url: `127.0.0.1:${grpcPort}`,
-      },
-    });
-
-    await app.listen();
-
-    client = KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${grpcPort}?tls=false`;
+    await startApp();
   });
 
   afterAll(async () => {
@@ -95,6 +79,31 @@ describe('Streams', () => {
     }
 
     return received;
+  }
+
+  async function startApp(): Promise<void> {
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+
+    app = moduleFixture.createNestMicroservice({
+      transport: Transport.GRPC,
+      options: {
+        package: 'event_store.client.streams',
+        protoPath: join(__dirname, '../src/protos/streams.proto'),
+        url: `127.0.0.1:${grpcPort}`,
+      },
+    });
+
+    await app.listen();
+
+    client = KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${grpcPort}?tls=false`;
+  }
+
+  async function restartApp(): Promise<void> {
+    await client.dispose();
+    await app.close();
+    await startApp();
   }
 
   it('writes events and reads them back over the KurrentDB interface', async () => {
@@ -355,6 +364,34 @@ describe('Streams', () => {
       {
         type: 'booking-completed',
         data: { step: 3 },
+      },
+      {
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      },
+    ]);
+  });
+
+  it('keeps persisted events after restarting the app', async () => {
+    const streamName = 'booking-restart-persistence';
+
+    await client.appendToStream(streamName, [
+      jsonEvent({
+        type: 'booking-created',
+        data: { step: 1 },
+      }),
+      jsonEvent({
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      }),
+    ]);
+
+    await restartApp();
+
+    expect(await readStreamEvents(streamName)).toEqual([
+      {
+        type: 'booking-created',
+        data: { step: 1 },
       },
       {
         type: 'booking-confirmed',
