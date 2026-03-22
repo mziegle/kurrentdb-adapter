@@ -3,6 +3,9 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { Transport } from '@nestjs/microservices';
 import {
   KurrentDBClient,
+  BACKWARDS,
+  END,
+  Direction,
   FORWARDS,
   START,
   StreamNotFoundError,
@@ -69,10 +72,12 @@ describe('Streams', () => {
 
   async function readStreamEvents(
     streamName: string,
+    direction: Direction = FORWARDS,
+    fromRevision: bigint | typeof START | typeof END = START,
   ): Promise<Array<{ type: string; data: unknown }>> {
     const readEvents = client.readStream(streamName, {
-      fromRevision: START,
-      direction: FORWARDS,
+      fromRevision,
+      direction,
       maxCount: 10,
     });
 
@@ -237,6 +242,40 @@ describe('Streams', () => {
       {
         type: 'booking-completed',
         data: { step: 3 },
+      },
+    ]);
+  });
+
+  it('returns events newest-first when reading backwards', async () => {
+    const streamName = 'booking-backwards';
+
+    await client.appendToStream(streamName, [
+      jsonEvent({
+        type: 'booking-created',
+        data: { step: 1 },
+      }),
+      jsonEvent({
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      }),
+      jsonEvent({
+        type: 'booking-completed',
+        data: { step: 3 },
+      }),
+    ]);
+
+    expect(await readStreamEvents(streamName, BACKWARDS, END)).toEqual([
+      {
+        type: 'booking-completed',
+        data: { step: 3 },
+      },
+      {
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      },
+      {
+        type: 'booking-created',
+        data: { step: 1 },
       },
     ]);
   });

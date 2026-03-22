@@ -179,8 +179,9 @@ export class PostgresEventStoreService
     }
 
     const limit = options.count !== undefined ? this.toNumber(options.count) : 100;
-    const order = options.readDirection === 1 ? 'DESC' : 'ASC';
-    const comparator = options.readDirection === 1 ? '<=' : '>=';
+    const isBackwards = this.isBackwardsRead(options.readDirection);
+    const order = isBackwards ? 'DESC' : 'ASC';
+    const comparator = isBackwards ? '<=' : '>=';
     const boundary = this.resolveReadBoundary(options);
 
     const params: Array<number | string> = [streamName];
@@ -326,11 +327,15 @@ export class PostgresEventStoreService
     }
 
     if (stream.start !== undefined) {
-      return options.readDirection === 1 ? Number.MAX_SAFE_INTEGER : 0;
+      return this.isBackwardsRead(options.readDirection)
+        ? Number.MAX_SAFE_INTEGER
+        : 0;
     }
 
     if (stream.end !== undefined) {
-      return options.readDirection === 1 ? Number.MAX_SAFE_INTEGER : null;
+      return this.isBackwardsRead(options.readDirection)
+        ? Number.MAX_SAFE_INTEGER
+        : null;
     }
 
     return null;
@@ -338,6 +343,16 @@ export class PostgresEventStoreService
 
   private decodeStreamName(streamName: Uint8Array): string {
     return Buffer.from(streamName).toString('utf8');
+  }
+
+  private isBackwardsRead(
+    readDirection: NonNullable<ReadReq['options']>['readDirection'] | string,
+  ): boolean {
+    return (
+      readDirection === 1 ||
+      readDirection === 'Backwards' ||
+      readDirection === 'BACKWARDS'
+    );
   }
 
   private getEventId(id: AppendReq_ProposedMessage['id']): string {
