@@ -423,6 +423,45 @@ describe('Streams', () => {
     );
   });
 
+  it('rejects stale expected revisions when deleting and keeps the stream intact', async () => {
+    const streamName = 'booking-delete-concurrency';
+
+    await client.appendToStream(streamName, [
+      jsonEvent({
+        type: 'booking-created',
+        data: { step: 1 },
+      }),
+      jsonEvent({
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      }),
+    ]);
+
+    let caughtError: unknown;
+    try {
+      await client.deleteStream(streamName, {
+        expectedRevision: 0n,
+      });
+    } catch (error) {
+      caughtError = error;
+    }
+
+    expect(caughtError).toMatchObject({
+      type: 'unknown',
+    });
+
+    expect(await readStreamEvents(streamName)).toEqual([
+      {
+        type: 'booking-created',
+        data: { step: 1 },
+      },
+      {
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      },
+    ]);
+  });
+
   it('tombstones a stream and rejects subsequent appends as stream deleted', async () => {
     const streamName = 'booking-tombstone';
 
@@ -444,5 +483,78 @@ describe('Streams', () => {
         }),
       ),
     ).rejects.toBeInstanceOf(StreamDeletedError);
+  });
+
+  it('rejects stale expected revisions when tombstoning and keeps the stream usable', async () => {
+    const streamName = 'booking-tombstone-concurrency';
+
+    await client.appendToStream(streamName, [
+      jsonEvent({
+        type: 'booking-created',
+        data: { step: 1 },
+      }),
+      jsonEvent({
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      }),
+    ]);
+
+    let caughtError: unknown;
+    try {
+      await client.tombstoneStream(streamName, {
+        expectedRevision: 0n,
+      });
+    } catch (error) {
+      caughtError = error;
+    }
+
+    expect(caughtError).toMatchObject({
+      type: 'unknown',
+    });
+
+    expect(await readStreamEvents(streamName)).toEqual([
+      {
+        type: 'booking-created',
+        data: { step: 1 },
+      },
+      {
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      },
+    ]);
+
+    const appendResult = await client.appendToStream(
+      streamName,
+      jsonEvent({
+        type: 'booking-completed',
+        data: { step: 3 },
+      }),
+      {
+        streamState: 1n,
+      },
+    );
+
+    expect(appendResult).toMatchObject({
+      success: true,
+      nextExpectedRevision: 2n,
+    });
+  });
+
+  it('rejects reads from a tombstoned stream as stream deleted', async () => {
+    const streamName = 'booking-tombstone-read';
+
+    await client.appendToStream(
+      streamName,
+      jsonEvent({
+        type: 'booking-created',
+        data: { step: 1 },
+      }),
+    );
+
+    await client.tombstoneStream(streamName);
+
+    await expect(readStreamEvents(streamName)).rejects.toMatchObject({
+      name: 'UnknownError',
+    });
   });
 });

@@ -42,7 +42,9 @@ export class StreamsController {
           }
           subscriber.complete();
         })
-        .catch((error: unknown) => subscriber.error(error));
+        .catch((error: unknown) =>
+          subscriber.error(this.mapServiceError(error)),
+        );
     });
   }
 
