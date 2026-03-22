@@ -1,4 +1,5 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { Pool, PoolClient } from 'pg';
 import {
   AppendReq,
@@ -11,6 +12,7 @@ import {
   TombstoneReq,
   TombstoneResp,
 } from './interfaces/streams';
+import { Timestamp } from './interfaces/google/protobuf/timestamp';
 
 type PersistedEventRow = {
   global_position: string | number;
@@ -39,6 +41,8 @@ export class PostgresEventStoreService
   implements OnModuleInit, OnModuleDestroy
 {
   private readonly pool = new Pool(this.getPoolConfig());
+  private readonly streamVersions = new Map<string, number>();
+  private readonly streamListeners = new Map<string, Set<() => void>>();
 
   async onModuleInit(): Promise<void> {
     await this.pool.query(`
@@ -138,6 +142,10 @@ export class PostgresEventStoreService
 
       await client.query('COMMIT');
 
+      if (proposedMessages.length > 0) {
+        this.notifyStreamUpdated(streamName);
+      }
+
       if (proposedMessages.length === 0) {
         return {
           success: {
@@ -174,10 +182,6 @@ export class PostgresEventStoreService
       throw new Error('Only stream reads are currently supported.');
     }
 
-    if (options.subscription) {
-      throw new Error('Subscription reads are not supported.');
-    }
-
     if (options.filter) {
       throw new Error('Filtered reads are not supported.');
     }
@@ -186,70 +190,78 @@ export class PostgresEventStoreService
       options.stream.streamIdentifier.streamName,
     );
     await this.ensureStreamIsNotTombstoned(streamName);
-    const exists = await this.streamExists(streamName);
-    if (!exists) {
-      return [
-        {
-          streamNotFound: {
-            streamIdentifier: {
-              streamName: Buffer.from(streamName),
-            },
-          },
-        },
-      ];
+    return this.readSnapshot(streamName, options);
+  }
+
+  async *subscribeToStream(
+    request: ReadReq,
+    isCancelled: () => boolean,
+  ): AsyncGenerator<ReadResp> {
+    const options = request.options;
+    if (!options?.stream?.streamIdentifier?.streamName) {
+      throw new Error('Only stream reads are currently supported.');
     }
 
-    const limit = options.count !== undefined ? this.toNumber(options.count) : 100;
-    const isBackwards = this.isBackwardsRead(options.readDirection);
-    const order = isBackwards ? 'DESC' : 'ASC';
-    const comparator = isBackwards ? '<=' : '>=';
-    const boundary = this.resolveReadBoundary(options);
-
-    const params: Array<number | string> = [streamName];
-    let whereClause = 'WHERE stream_name = $1';
-    if (boundary !== null) {
-      params.push(boundary);
-      whereClause += ` AND stream_revision ${comparator} $2`;
+    if (!options.subscription) {
+      throw new Error('Subscription reads must include subscription options.');
     }
 
-    params.push(limit);
+    if (options.filter) {
+      throw new Error('Filtered reads are not supported.');
+    }
 
-    const result = await this.pool.query<PersistedEventRow>(
-      `
-        SELECT
-          global_position,
-          stream_name,
-          stream_revision,
-          event_id,
-          metadata,
-          custom_metadata,
-          data
-        FROM stream_events
-        ${whereClause}
-        ORDER BY stream_revision ${order}
-        LIMIT $${params.length}
-      `,
-      params,
+    if (this.isBackwardsRead(options.readDirection)) {
+      throw new Error('Backwards subscriptions are not supported.');
+    }
+
+    const streamName = this.decodeStreamName(
+      options.stream.streamIdentifier.streamName,
     );
+    await this.ensureStreamIsNotTombstoned(streamName);
 
-    return result.rows.map((row) => ({
-      event: {
-        event: {
-          id: { string: row.event_id },
-          streamIdentifier: {
-            streamName: Buffer.from(row.stream_name),
-          },
-          streamRevision: this.toNumber(row.stream_revision),
-          preparePosition: this.toNumber(row.global_position),
-          commitPosition: this.toNumber(row.global_position),
-          metadata: row.metadata ?? {},
-          customMetadata: Buffer.from(row.custom_metadata ?? new Uint8Array()),
-          data: Buffer.from(row.data ?? new Uint8Array()),
-        },
-        link: undefined,
-        commitPosition: this.toNumber(row.global_position),
+    yield {
+      confirmation: {
+        subscriptionId: randomUUID(),
       },
-    }));
+    };
+
+    let nextRevisionExclusive = await this.resolveSubscriptionBoundary(streamName, options);
+    let caughtUp = false;
+
+    while (!isCancelled()) {
+      const versionBeforeRead = this.getStreamVersion(streamName);
+      const rows = await this.readSubscriptionRows(streamName, nextRevisionExclusive);
+
+      if (rows.length > 0) {
+        for (const row of rows) {
+          if (isCancelled()) {
+            return;
+          }
+
+          nextRevisionExclusive = this.toNumber(row.stream_revision);
+          yield this.mapRowToReadResponse(row);
+        }
+
+        continue;
+      }
+
+      if (!caughtUp) {
+        yield {
+          caughtUp: {
+            timestamp: this.createTimestamp(),
+            streamRevision:
+              nextRevisionExclusive >= 0 ? nextRevisionExclusive : undefined,
+          },
+        };
+        caughtUp = true;
+      }
+
+      if (versionBeforeRead !== this.getStreamVersion(streamName)) {
+        continue;
+      }
+
+      await this.waitForStreamUpdate(streamName, versionBeforeRead, isCancelled);
+    }
   }
 
   async delete(request: DeleteReq): Promise<DeleteResp> {
@@ -395,7 +407,7 @@ export class PostgresEventStoreService
   }
 
   private async getCurrentRevision(
-    client: PoolClient,
+    client: PoolClient | Pool,
     streamName: string,
   ): Promise<number | null> {
     const result = await client.query<{ stream_revision: string | number }>(
@@ -413,7 +425,198 @@ export class PostgresEventStoreService
       return null;
     }
 
-      return this.toNumber(result.rows[0].stream_revision);
+    return this.toNumber(result.rows[0].stream_revision);
+  }
+
+  private async readSnapshot(
+    streamName: string,
+    options: NonNullable<ReadReq['options']>,
+  ): Promise<ReadResp[]> {
+    const exists = await this.streamExists(streamName);
+    if (!exists) {
+      return [
+        {
+          streamNotFound: {
+            streamIdentifier: {
+              streamName: Buffer.from(streamName),
+            },
+          },
+        },
+      ];
+    }
+
+    const limit = options.count !== undefined ? this.toNumber(options.count) : 100;
+    const isBackwards = this.isBackwardsRead(options.readDirection);
+    const order = isBackwards ? 'DESC' : 'ASC';
+    const comparator = isBackwards ? '<=' : '>=';
+    const boundary = this.resolveReadBoundary(options);
+
+    const params: Array<number | string> = [streamName];
+    let whereClause = 'WHERE stream_name = $1';
+    if (boundary !== null) {
+      params.push(boundary);
+      whereClause += ` AND stream_revision ${comparator} $2`;
+    }
+
+    params.push(limit);
+
+    const result = await this.pool.query<PersistedEventRow>(
+      `
+        SELECT
+          global_position,
+          stream_name,
+          stream_revision,
+          event_id,
+          metadata,
+          custom_metadata,
+          data
+        FROM stream_events
+        ${whereClause}
+        ORDER BY stream_revision ${order}
+        LIMIT $${params.length}
+      `,
+      params,
+    );
+
+    return result.rows.map((row) => this.mapRowToReadResponse(row));
+  }
+
+  private async resolveSubscriptionBoundary(
+    streamName: string,
+    options: NonNullable<ReadReq['options']>,
+  ): Promise<number> {
+    const stream = options.stream;
+    if (!stream) {
+      return -1;
+    }
+
+    if (stream.revision !== undefined) {
+      return this.toNumber(stream.revision) - 1;
+    }
+
+    if (stream.end !== undefined) {
+      return (await this.getCurrentRevision(this.pool, streamName)) ?? -1;
+    }
+
+    return -1;
+  }
+
+  private async readSubscriptionRows(
+    streamName: string,
+    nextRevisionExclusive: number,
+  ): Promise<PersistedEventRow[]> {
+    const result = await this.pool.query<PersistedEventRow>(
+      `
+        SELECT
+          global_position,
+          stream_name,
+          stream_revision,
+          event_id,
+          metadata,
+          custom_metadata,
+          data
+        FROM stream_events
+        WHERE stream_name = $1
+          AND stream_revision > $2
+        ORDER BY stream_revision ASC
+        LIMIT 100
+      `,
+      [streamName, nextRevisionExclusive],
+    );
+
+    return result.rows;
+  }
+
+  private mapRowToReadResponse(row: PersistedEventRow): ReadResp {
+    return {
+      event: {
+        event: {
+          id: { string: row.event_id },
+          streamIdentifier: {
+            streamName: Buffer.from(row.stream_name),
+          },
+          streamRevision: this.toNumber(row.stream_revision),
+          preparePosition: this.toNumber(row.global_position),
+          commitPosition: this.toNumber(row.global_position),
+          metadata: row.metadata ?? {},
+          customMetadata: Buffer.from(row.custom_metadata ?? new Uint8Array()),
+          data: Buffer.from(row.data ?? new Uint8Array()),
+        },
+        link: undefined,
+        commitPosition: this.toNumber(row.global_position),
+      },
+    };
+  }
+
+  private createTimestamp(): Timestamp {
+    const now = Date.now();
+
+    return {
+      seconds: Math.floor(now / 1000),
+      nanos: (now % 1000) * 1_000_000,
+    };
+  }
+
+  private getStreamVersion(streamName: string): number {
+    return this.streamVersions.get(streamName) ?? 0;
+  }
+
+  private notifyStreamUpdated(streamName: string): void {
+    const nextVersion = this.getStreamVersion(streamName) + 1;
+    this.streamVersions.set(streamName, nextVersion);
+
+    const listeners = this.streamListeners.get(streamName);
+    if (!listeners) {
+      return;
+    }
+
+    this.streamListeners.delete(streamName);
+    for (const listener of listeners) {
+      listener();
+    }
+  }
+
+  private waitForStreamUpdate(
+    streamName: string,
+    observedVersion: number,
+    isCancelled: () => boolean,
+  ): Promise<void> {
+    if (isCancelled() || this.getStreamVersion(streamName) !== observedVersion) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      const listeners = this.streamListeners.get(streamName) ?? new Set<() => void>();
+      let settled = false;
+      let interval: NodeJS.Timeout | undefined;
+
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        if (interval) {
+          clearInterval(interval);
+        }
+
+        listeners.delete(finish);
+        if (listeners.size === 0) {
+          this.streamListeners.delete(streamName);
+        }
+
+        resolve();
+      };
+
+      listeners.add(finish);
+      this.streamListeners.set(streamName, listeners);
+
+      interval = setInterval(() => {
+        if (isCancelled() || this.getStreamVersion(streamName) !== observedVersion) {
+          finish();
+        }
+      }, 100);
+    });
   }
 
   private async streamExists(streamName: string): Promise<boolean> {

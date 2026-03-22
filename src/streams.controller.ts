@@ -23,6 +23,7 @@ import {
 import {
   Metadata,
   ServerReadableStream,
+  ServerWritableStream,
   sendUnaryData,
   status,
 } from '@grpc/grpc-js';
@@ -32,19 +33,57 @@ export class StreamsController {
   constructor(private readonly eventStore: PostgresEventStoreService) {}
 
   @GrpcMethod('Streams', 'read')
-  read(request: ReadReq): Observable<ReadResp> {
+  read(
+    request: ReadReq,
+    _metadata?: Metadata,
+    call?: ServerWritableStream<ReadReq, ReadResp>,
+  ): Observable<ReadResp> {
     return new Observable<ReadResp>((subscriber) => {
-      this.eventStore
-        .read(request)
-        .then((responses) => {
+      let cancelled = false;
+      const cancelHandler = () => {
+        cancelled = true;
+      };
+
+      call?.on('cancelled', cancelHandler);
+
+      void (async () => {
+        try {
+          if (request.options?.subscription) {
+            for await (const response of this.eventStore.subscribeToStream(
+              request,
+              () => cancelled,
+            )) {
+              if (cancelled) {
+                return;
+              }
+
+              subscriber.next(response);
+            }
+
+            if (!cancelled) {
+              subscriber.complete();
+            }
+
+            return;
+          }
+
+          const responses = await this.eventStore.read(request);
           for (const response of responses) {
             subscriber.next(response);
           }
+
           subscriber.complete();
-        })
-        .catch((error: unknown) =>
-          subscriber.error(this.mapServiceError(error)),
-        );
+        } catch (error: unknown) {
+          if (!cancelled) {
+            subscriber.error(this.mapServiceError(error));
+          }
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+        call?.off('cancelled', cancelHandler);
+      };
     });
   }
 
