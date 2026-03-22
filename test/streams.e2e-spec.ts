@@ -74,11 +74,12 @@ describe('Streams', () => {
     streamName: string,
     direction: Direction = FORWARDS,
     fromRevision: bigint | typeof START | typeof END = START,
+    maxCount = 10,
   ): Promise<Array<{ type: string; data: unknown }>> {
     const readEvents = client.readStream(streamName, {
       fromRevision,
       direction,
-      maxCount: 10,
+      maxCount,
     });
 
     const received: Array<{ type: string; data: unknown }> = [];
@@ -276,6 +277,88 @@ describe('Streams', () => {
       {
         type: 'booking-created',
         data: { step: 1 },
+      },
+    ]);
+  });
+
+  it('reads the correct slice when starting from a specific revision', async () => {
+    const streamName = 'booking-revision-slice';
+
+    await client.appendToStream(streamName, [
+      jsonEvent({
+        type: 'booking-created',
+        data: { step: 1 },
+      }),
+      jsonEvent({
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      }),
+      jsonEvent({
+        type: 'booking-completed',
+        data: { step: 3 },
+      }),
+    ]);
+
+    expect(await readStreamEvents(streamName, FORWARDS, 1n)).toEqual([
+      {
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      },
+      {
+        type: 'booking-completed',
+        data: { step: 3 },
+      },
+    ]);
+
+    expect(await readStreamEvents(streamName, BACKWARDS, 1n)).toEqual([
+      {
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      },
+      {
+        type: 'booking-created',
+        data: { step: 1 },
+      },
+    ]);
+  });
+
+  it('limits reads with maxCount in both directions', async () => {
+    const streamName = 'booking-max-count';
+
+    await client.appendToStream(streamName, [
+      jsonEvent({
+        type: 'booking-created',
+        data: { step: 1 },
+      }),
+      jsonEvent({
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      }),
+      jsonEvent({
+        type: 'booking-completed',
+        data: { step: 3 },
+      }),
+    ]);
+
+    expect(await readStreamEvents(streamName, FORWARDS, START, 2)).toEqual([
+      {
+        type: 'booking-created',
+        data: { step: 1 },
+      },
+      {
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      },
+    ]);
+
+    expect(await readStreamEvents(streamName, BACKWARDS, END, 2)).toEqual([
+      {
+        type: 'booking-completed',
+        data: { step: 3 },
+      },
+      {
+        type: 'booking-confirmed',
+        data: { step: 2 },
       },
     ]);
   });
