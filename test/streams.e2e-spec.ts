@@ -92,7 +92,7 @@ describe('Streams', () => {
       transport: Transport.GRPC,
       options: {
         package: 'event_store.client.streams',
-        protoPath: join(__dirname, '../src/protos/streams.proto'),
+        protoPath: join(__dirname, '../proto/streams.proto'),
         url: `127.0.0.1:${grpcPort}`,
       },
     });

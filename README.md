@@ -1,6 +1,7 @@
 # kurrentdb-adapter
 
-`kurrentdb-adapter` is a NestJS gRPC service that exposes the EventStore/KurrentDB `Streams` protobuf contract and persists stream events in PostgreSQL.
+`kurrentdb-adapter` is a NestJS gRPC service that exposes the EventStore/KurrentDB `Streams` protobuf 
+contract and persists stream events in PostgreSQL.
 
 It is still a partial adapter, not a full KurrentDB-compatible implementation.
 
@@ -8,7 +9,7 @@ It is still a partial adapter, not a full KurrentDB-compatible implementation.
 
 - Boots a NestJS microservice over gRPC
 - Uses the `event_store.client.streams` protobuf package
-- Loads the service definition from `src/protos/streams.proto`
+- Loads the service definition from `proto/streams.proto`
 - Generates TypeScript interfaces from protobuf files with `ts-proto`
 - Stores appended events in PostgreSQL
 - Reads persisted stream events back over gRPC
@@ -19,17 +20,21 @@ It is still a partial adapter, not a full KurrentDB-compatible implementation.
 Implemented:
 
 - `Read`
-  Reads persisted events for a single stream from PostgreSQL.
+  Reads persisted events for a single stream from PostgreSQL, including forward and backward reads, revision-based reads, and `maxCount` limits.
 - `Append`
   Persists appended events transactionally in PostgreSQL and returns the resulting revision/position.
+- `Delete`
+  Deletes a stream with expected-revision checks.
+- `Tombstone`
+  Permanently tombstones a stream and prevents future appends, reads, and deletes.
 
 Not implemented:
 
-- `Delete`
-- `Tombstone`
 - `BatchAppend`
+- Filtered reads
+- Subscription reads
 
-These methods currently throw `Method not implemented.` and should be treated as unsupported.
+Unsupported read modes still throw and should be treated as unavailable.
 
 ## Stack
 
@@ -49,8 +54,9 @@ src/
   main.ts
   app.module.ts
   streams.controller.ts
-  protos/
   interfaces/
+
+proto/
 
 test/
   streams.e2e-spec.ts
@@ -62,6 +68,7 @@ test/
 
 - Node.js 20+ recommended
 - npm
+- Docker Desktop or another supported container runtime for e2e tests
 
 ### Install
 
@@ -113,7 +120,7 @@ npm run start:prod
 
 ## Protobuf Generation
 
-The protobuf source files live in `src/protos`. Generated TypeScript interfaces are written to `src/interfaces`.
+The protobuf source files live in `proto/`. Generated TypeScript interfaces are written to `src/interfaces`.
 
 Regenerate them with:
 
@@ -146,16 +153,37 @@ The adapter exposes the `Streams` gRPC service:
 - `Tombstone(TombstoneReq) returns (TombstoneResp)`
 - `BatchAppend(stream BatchAppendReq) returns (stream BatchAppendResp)`
 
+## Testing
+
+E2E coverage lives in `test/streams.e2e-spec.ts` and runs the adapter against PostgreSQL started by Testcontainers. The tests currently cover:
+
+- single-event append/read
+- stale expected revision rejection on append
+- missing stream reads
+- multi-event append ordering
+- backward reads
+- reads from a specific revision
+- `maxCount` slicing
+- persistence across app restart
+- `Delete`
+- `Tombstone`
+
+Run them with:
+
+```bash
+npm run test:e2e -- --runInBand
+```
+
 ## Limitations
 
 - Only stream-scoped reads are supported.
-- Filtered reads and subscription reads are not implemented.
-- `Delete`, `Tombstone`, and `BatchAppend` are still unimplemented.
+- `BatchAppend`, filtered reads, and subscription reads are not implemented.
 - Stream positions are backed by a simple Postgres global sequence, not full KurrentDB semantics.
-- End-to-end coverage is still minimal.
+- `Append` wrong-expected-version is mapped with an `AppendResp.wrongExpectedVersion` payload because that is what the Kurrent client expects.
+- Some unary and server-stream gRPC failures still surface to the Kurrent client as `UnknownError` instead of richer protocol-specific errors, especially around `Delete`, `Tombstone`, and tombstoned reads.
 
 ## Recommended Next Steps
 
-- implement `Delete`, `Tombstone`, and `BatchAppend`
+- implement `BatchAppend`
 - map gRPC errors to expected KurrentDB client behavior
-- expand integration tests with real client request flows
+- expand integration tests as new RPCs are added

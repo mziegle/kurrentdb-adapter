@@ -13,7 +13,7 @@ async function bootstrap() {
       options: {
         url: grpcUrl,
         package: 'event_store.client.streams',
-        protoPath: join(__dirname, 'protos/streams.proto'),
+        protoPath: join(__dirname, 'proto/streams.proto'),
       },
     },
   );
