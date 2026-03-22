@@ -65,7 +65,7 @@ export class StreamsController {
   delete(
     request: DeleteReq,
   ): Promise<DeleteResp> | Observable<DeleteResp> | DeleteResp {
-    throw new Error('Method not implemented.');
+    return this.eventStore.delete(request);
   }
 
   @GrpcMethod('Streams', 'tombstone')

@@ -399,4 +399,26 @@ describe('Streams', () => {
       },
     ]);
   });
+
+  it('deletes a stream and makes subsequent reads fail with stream not found', async () => {
+    const streamName = 'booking-delete';
+
+    await client.appendToStream(streamName, [
+      jsonEvent({
+        type: 'booking-created',
+        data: { step: 1 },
+      }),
+      jsonEvent({
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      }),
+    ]);
+
+    const deleteResult = await client.deleteStream(streamName);
+
+    expect(deleteResult).toHaveProperty('position');
+    await expect(readStreamEvents(streamName)).rejects.toBeInstanceOf(
+      StreamNotFoundError,
+    );
+  });
 });

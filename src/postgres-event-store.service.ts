@@ -4,6 +4,8 @@ import {
   AppendReq,
   AppendReq_ProposedMessage,
   AppendResp,
+  DeleteReq,
+  DeleteResp,
   ReadReq,
   ReadResp,
 } from './interfaces/streams';
@@ -231,6 +233,64 @@ export class PostgresEventStoreService
     }));
   }
 
+  async delete(request: DeleteReq): Promise<DeleteResp> {
+    const options = request.options;
+    if (!options?.streamIdentifier?.streamName) {
+      throw new Error('Delete request is missing a stream identifier.');
+    }
+
+    const streamName = this.decodeStreamName(options.streamIdentifier.streamName);
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const currentRevision = await this.getCurrentRevision(client, streamName);
+      const mismatch = this.getDeleteExpectedVersionMismatch(
+        options,
+        currentRevision,
+        streamName,
+      );
+      if (mismatch) {
+        await client.query('ROLLBACK');
+        throw mismatch;
+      }
+
+      if (currentRevision === null) {
+        await client.query('COMMIT');
+        return { noPosition: {} };
+      }
+
+      const deleted = await client.query<{ global_position: string | number }>(
+        `
+          DELETE FROM stream_events
+          WHERE stream_name = $1
+          RETURNING global_position
+        `,
+        [streamName],
+      );
+
+      await client.query('COMMIT');
+
+      const lastPosition = deleted.rows.reduce(
+        (max, row) => Math.max(max, this.toNumber(row.global_position)),
+        0,
+      );
+
+      return {
+        position: {
+          commitPosition: lastPosition,
+          preparePosition: lastPosition,
+        },
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   private getPoolConfig(): ConstructorParameters<typeof Pool>[0] {
     if (process.env.POSTGRES_URL) {
       return { connectionString: process.env.POSTGRES_URL };
@@ -314,6 +374,30 @@ export class PostgresEventStoreService
     };
   }
 
+  private getDeleteExpectedVersionMismatch(
+    options: NonNullable<DeleteReq['options']>,
+    currentRevision: number | null,
+    streamName: string,
+  ): Error | null {
+    const expectedRevision =
+      options.revision === undefined ? undefined : this.toNumber(options.revision);
+    const matches =
+      options.any !== undefined ||
+      (options.noStream !== undefined && currentRevision === null) ||
+      (options.streamExists !== undefined && currentRevision !== null) ||
+      (expectedRevision !== undefined && currentRevision === expectedRevision);
+
+    if (matches) {
+      return null;
+    }
+
+    return this.createWrongExpectedVersionError(
+      streamName,
+      expectedRevision,
+      currentRevision,
+    );
+  }
+
   private resolveReadBoundary(
     options: NonNullable<ReadReq['options']>,
   ): number | null {
@@ -343,6 +427,33 @@ export class PostgresEventStoreService
 
   private decodeStreamName(streamName: Uint8Array): string {
     return Buffer.from(streamName).toString('utf8');
+  }
+
+  private createWrongExpectedVersionError(
+    streamName: string,
+    expectedRevision: number | undefined,
+    currentRevision: number | null,
+  ): Error {
+    const error = new Error('Wrong expected version.') as Error & {
+      code?: number;
+      details?: string;
+      metadata?: import('@grpc/grpc-js').Metadata;
+    };
+    const { Metadata, status } = require('@grpc/grpc-js') as typeof import('@grpc/grpc-js');
+    const metadata = new Metadata();
+    metadata.set('exception', 'wrong-expected-version');
+    metadata.set('stream-name', streamName);
+    metadata.set(
+      'expected-version',
+      expectedRevision === undefined ? '-2' : expectedRevision.toString(),
+    );
+    if (currentRevision !== null) {
+      metadata.set('actual-version', currentRevision.toString());
+    }
+    error.code = status.UNKNOWN;
+    error.details = 'Wrong expected version.';
+    error.metadata = metadata;
+    return error;
   }
 
   private isBackwardsRead(
