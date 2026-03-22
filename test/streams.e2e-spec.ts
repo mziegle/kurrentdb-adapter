@@ -66,23 +66,9 @@ describe('Streams', () => {
     }
   });
 
-  it('writes events and reads them back over the KurrentDB interface', async () => {
-    const streamName = 'booking-abc123';
-
-    const event = jsonEvent({
-      type: 'booking-created',
-      data: {
-        foo: 'bar',
-      },
-    });
-
-    const appendResult = await client.appendToStream(streamName, event);
-
-    expect(appendResult).toMatchObject({
-      success: true,
-      nextExpectedRevision: 0n,
-    });
-
+  async function readStreamEvents(
+    streamName: string,
+  ): Promise<Array<{ type: string; data: unknown }>> {
     const readEvents = client.readStream(streamName, {
       fromRevision: START,
       direction: FORWARDS,
@@ -101,12 +87,99 @@ describe('Streams', () => {
       });
     }
 
-    expect(received).toEqual([
+    return received;
+  }
+
+  it('writes events and reads them back over the KurrentDB interface', async () => {
+    const streamName = 'booking-abc123';
+
+    const event = jsonEvent({
+      type: 'booking-created',
+      data: {
+        foo: 'bar',
+      },
+    });
+
+    const appendResult = await client.appendToStream(streamName, event);
+
+    expect(appendResult).toMatchObject({
+      success: true,
+      nextExpectedRevision: 0n,
+    });
+
+    expect(await readStreamEvents(streamName)).toEqual([
       {
         type: 'booking-created',
         data: {
           foo: 'bar',
         },
+      },
+    ]);
+  });
+
+  it('rejects stale expected revisions and keeps stream contents unchanged', async () => {
+    const streamName = 'booking-concurrency';
+
+    const firstAppend = await client.appendToStream(
+      streamName,
+      jsonEvent({
+        type: 'booking-created',
+        data: { step: 1 },
+      }),
+    );
+
+    expect(firstAppend).toMatchObject({
+      success: true,
+      nextExpectedRevision: 0n,
+    });
+
+    const secondAppend = await client.appendToStream(
+      streamName,
+      jsonEvent({
+        type: 'booking-confirmed',
+        data: { step: 2 },
+      }),
+      {
+        streamState: firstAppend.nextExpectedRevision,
+      },
+    );
+
+    expect(secondAppend).toMatchObject({
+      success: true,
+      nextExpectedRevision: 1n,
+    });
+
+    let caughtError: unknown;
+    try {
+      await client.appendToStream(
+        streamName,
+        jsonEvent({
+          type: 'booking-should-fail',
+          data: { step: 999 },
+        }),
+        {
+          streamState: firstAppend.nextExpectedRevision,
+        },
+      );
+    } catch (error) {
+      caughtError = error;
+    }
+
+    expect(caughtError).toMatchObject({
+      type: 'wrong-expected-version',
+      streamName,
+      expectedState: 0n,
+      actualState: 1n,
+    });
+
+    expect(await readStreamEvents(streamName)).toEqual([
+      {
+        type: 'booking-created',
+        data: { step: 1 },
+      },
+      {
+        type: 'booking-confirmed',
+        data: { step: 2 },
       },
     ]);
   });

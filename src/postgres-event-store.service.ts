@@ -78,7 +78,7 @@ export class PostgresEventStoreService
       await client.query('BEGIN');
 
       const currentRevision = await this.getCurrentRevision(client, streamName);
-      const mismatch = this.buildWrongExpectedVersion(options, currentRevision);
+      const mismatch = this.getExpectedVersionMismatch(options, currentRevision);
       if (mismatch) {
         await client.query('ROLLBACK');
         return mismatch;
@@ -279,15 +279,17 @@ export class PostgresEventStoreService
     return result.rows[0]?.exists ?? false;
   }
 
-  private buildWrongExpectedVersion(
+  private getExpectedVersionMismatch(
     options: NonNullable<AppendReq['options']>,
     currentRevision: number | null,
   ): AppendResp | null {
+    const expectedRevision =
+      options.revision === undefined ? undefined : this.toNumber(options.revision);
     const matches =
       options.any !== undefined ||
       (options.noStream !== undefined && currentRevision === null) ||
       (options.streamExists !== undefined && currentRevision !== null) ||
-      (options.revision !== undefined && currentRevision === options.revision);
+      (expectedRevision !== undefined && currentRevision === expectedRevision);
 
     if (matches) {
       return null;
@@ -295,9 +297,15 @@ export class PostgresEventStoreService
 
     return {
       wrongExpectedVersion: {
-        currentRevision: currentRevision ?? undefined,
+        currentRevision:
+          currentRevision === null
+            ? undefined
+            : (String(currentRevision) as unknown as number),
         currentNoStream: currentRevision === null ? {} : undefined,
-        expectedRevision: options.revision,
+        expectedRevision:
+          expectedRevision === undefined
+            ? undefined
+            : (String(expectedRevision) as unknown as number),
         expectedAny: options.any,
         expectedStreamExists: options.streamExists,
         expectedNoStream: options.noStream,
