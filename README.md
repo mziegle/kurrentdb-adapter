@@ -58,7 +58,9 @@ src/
 proto/
 
 test/
+  contracts/
   streams.e2e-spec.ts
+  kurrentdb.e2e-spec.ts
 ```
 
 ## Getting Started
@@ -160,12 +162,17 @@ The shared contract tests currently cover:
 
 - single-event append/read
 - stale expected revision rejection on append
+- `NO_STREAM` append behavior
+- `STREAM_EXISTS` append behavior
+- empty append behavior on missing and existing streams
 - missing stream reads
 - multi-event append ordering
 - backward reads
 - reads from a specific revision
+- explicit revision `0` handling
 - `maxCount` slicing
-- persistence across app restart
+- stream subscriptions
+- persistence across app restart on the adapter backend
 - `Delete`
 - `Tombstone`
 
@@ -185,10 +192,10 @@ npm run test:e2e:contracts -- --runInBand
 - `BatchAppend` and filtered reads are not implemented.
 - Stream positions are backed by a simple Postgres global sequence, not full KurrentDB semantics.
 - `Append` wrong-expected-version is mapped with an `AppendResp.wrongExpectedVersion` payload because that is what the Kurrent client expects.
-- Some unary and server-stream gRPC failures still surface to the Kurrent client as `UnknownError` instead of richer protocol-specific errors, especially around `Delete`, `Tombstone`, and tombstoned reads.
+- The default real-KurrentDB contract runner uses an ephemeral container, so restart-persistence is intentionally skipped there.
 
 ## Recommended Next Steps
 
-- make the adapter pass the full shared contract suite against real KurrentDB behavior
 - implement `BatchAppend`
+- add a persistent-volume KurrentDB runner for restart-persistence parity
 - expand the contract suite as new RPCs are added
