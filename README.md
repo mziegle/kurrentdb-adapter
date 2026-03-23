@@ -1,6 +1,6 @@
 # kurrentdb-adapter
 
-`kurrentdb-adapter` is a NestJS gRPC service that exposes the EventStore/KurrentDB `Streams` protobuf 
+`kurrentdb-adapter` is a NestJS gRPC service that exposes the EventStore/KurrentDB `Streams` protobuf
 contract and persists stream events in PostgreSQL.
 
 It is still a partial adapter, not a full KurrentDB-compatible implementation.
@@ -32,7 +32,6 @@ Not implemented:
 
 - `BatchAppend`
 - Filtered reads
-- Subscription reads
 
 Unsupported read modes still throw and should be treated as unavailable.
 
@@ -155,7 +154,9 @@ The adapter exposes the `Streams` gRPC service:
 
 ## Testing
 
-E2E coverage lives in `test/streams.e2e-spec.ts` and runs the adapter against PostgreSQL started by Testcontainers. The tests currently cover:
+Contract coverage lives in `test/contracts/streams-contract-suite.ts` and is exercised by backend-specific runners. The adapter runner in `test/streams.e2e-spec.ts` starts PostgreSQL with Testcontainers and boots the Nest gRPC service. The KurrentDB runner in `test/kurrentdb.e2e-spec.ts` runs the same client-level assertions against a real KurrentDB target.
+
+The shared contract tests currently cover:
 
 - single-event append/read
 - stale expected revision rejection on append
@@ -171,19 +172,23 @@ E2E coverage lives in `test/streams.e2e-spec.ts` and runs the adapter against Po
 Run them with:
 
 ```bash
-npm run test:e2e -- --runInBand
+npm run test:e2e:adapter -- --runInBand
+npm run test:e2e:kurrentdb -- --runInBand
+npm run test:e2e:contracts -- --runInBand
 ```
+
+`test:e2e:kurrentdb` uses `KURRENTDB_TEST_CONNECTION_STRING` when provided. Otherwise it tries to start `docker.kurrent.io/kurrent-latest/kurrentdb:latest` in Testcontainers. The default KurrentDB runner currently skips restart-persistence assertions because it uses an ephemeral container.
 
 ## Limitations
 
 - Only stream-scoped reads are supported.
-- `BatchAppend`, filtered reads, and subscription reads are not implemented.
+- `BatchAppend` and filtered reads are not implemented.
 - Stream positions are backed by a simple Postgres global sequence, not full KurrentDB semantics.
 - `Append` wrong-expected-version is mapped with an `AppendResp.wrongExpectedVersion` payload because that is what the Kurrent client expects.
 - Some unary and server-stream gRPC failures still surface to the Kurrent client as `UnknownError` instead of richer protocol-specific errors, especially around `Delete`, `Tombstone`, and tombstoned reads.
 
 ## Recommended Next Steps
 
+- make the adapter pass the full shared contract suite against real KurrentDB behavior
 - implement `BatchAppend`
-- map gRPC errors to expected KurrentDB client behavior
-- expand integration tests as new RPCs are added
+- expand the contract suite as new RPCs are added

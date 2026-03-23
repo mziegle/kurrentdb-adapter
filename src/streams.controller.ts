@@ -1,5 +1,9 @@
 import { Controller } from '@nestjs/common';
-import { GrpcMethod, GrpcStreamCall } from '@nestjs/microservices';
+import {
+  GrpcMethod,
+  GrpcStreamCall,
+  RpcException,
+} from '@nestjs/microservices';
 import {
   AppendReq,
   AppendResp,
@@ -71,7 +75,7 @@ export class StreamsController {
           subscriber.complete();
         } catch (error: unknown) {
           if (!cancelled) {
-            subscriber.error(this.mapServiceError(error));
+            subscriber.error(new RpcException(this.mapServiceError(error)));
           }
         }
       })();
@@ -111,7 +115,7 @@ export class StreamsController {
     request: DeleteReq,
   ): Promise<DeleteResp> | Observable<DeleteResp> | DeleteResp {
     return this.eventStore.delete(request).catch((error: unknown) => {
-      throw this.mapServiceError(error);
+      throw new RpcException(this.mapServiceError(error));
     });
   }
 
@@ -120,7 +124,7 @@ export class StreamsController {
     request: TombstoneReq,
   ): Promise<TombstoneResp> | Observable<TombstoneResp> | TombstoneResp {
     return this.eventStore.tombstone(request).catch((error: unknown) => {
-      throw this.mapServiceError(error);
+      throw new RpcException(this.mapServiceError(error));
     });
   }
 
@@ -138,6 +142,7 @@ export class StreamsController {
       return Object.assign(
         new Error(`Stream "${error.streamName}" is deleted.`),
         {
+          name: 'StreamDeletedError',
           code: status.UNKNOWN,
           details: 'Stream deleted.',
           metadata,

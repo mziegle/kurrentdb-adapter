@@ -809,6 +809,7 @@ export class PostgresEventStoreService
       code?: number;
       details?: string;
       metadata?: Metadata;
+      name?: string;
     };
     const metadata = new Metadata();
     metadata.set('exception', 'wrong-expected-version');
@@ -820,6 +821,7 @@ export class PostgresEventStoreService
     if (currentRevision !== null) {
       metadata.set('actual-version', currentRevision.toString());
     }
+    error.name = 'WrongExpectedVersionError';
     error.code = status.UNKNOWN;
     error.details = 'Wrong expected version.';
     error.metadata = metadata;
