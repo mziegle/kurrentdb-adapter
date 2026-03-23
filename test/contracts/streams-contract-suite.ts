@@ -5,7 +5,9 @@ import {
   FORWARDS,
   jsonEvent,
   KurrentDBClient,
+  NO_STREAM,
   START,
+  STREAM_EXISTS,
   StreamDeletedError,
   StreamNotFoundError,
 } from '@kurrent/kurrentdb-client';
@@ -170,6 +172,158 @@ export function registerStreamsContractSuite(
       ]);
     });
 
+    it('accepts NO_STREAM for a missing stream and rejects it once the stream exists', async () => {
+      const streamName = createStreamName('append-no-stream');
+
+      const firstAppend = await backend.getClient().appendToStream(
+        streamName,
+        jsonEvent({
+          type: 'booking-created',
+          data: { step: 1 },
+        }),
+        {
+          streamState: NO_STREAM,
+        },
+      );
+
+      expect(firstAppend).toMatchObject({
+        success: true,
+        nextExpectedRevision: 0n,
+      });
+
+      let caughtError: unknown;
+      try {
+        await backend.getClient().appendToStream(
+          streamName,
+          jsonEvent({
+            type: 'booking-should-fail',
+            data: { step: 2 },
+          }),
+          {
+            streamState: NO_STREAM,
+          },
+        );
+      } catch (error) {
+        caughtError = error;
+      }
+
+      expect(caughtError).toMatchObject({
+        type: 'wrong-expected-version',
+        streamName,
+        expectedState: 'no_stream',
+        actualState: 0n,
+      });
+    });
+
+    it('rejects STREAM_EXISTS for a missing stream and accepts it once the stream exists', async () => {
+      const streamName = createStreamName('append-stream-exists');
+
+      let caughtError: unknown;
+      try {
+        await backend.getClient().appendToStream(
+          streamName,
+          jsonEvent({
+            type: 'booking-should-fail',
+            data: { step: 0 },
+          }),
+          {
+            streamState: STREAM_EXISTS,
+          },
+        );
+      } catch (error) {
+        caughtError = error;
+      }
+
+      expect(caughtError).toMatchObject({
+        type: 'wrong-expected-version',
+        streamName,
+        expectedState: 'stream_exists',
+        actualState: 'no_stream',
+      });
+
+      const createResult = await backend.getClient().appendToStream(
+        streamName,
+        jsonEvent({
+          type: 'booking-created',
+          data: { step: 1 },
+        }),
+      );
+
+      expect(createResult).toMatchObject({
+        success: true,
+        nextExpectedRevision: 0n,
+      });
+
+      const appendResult = await backend.getClient().appendToStream(
+        streamName,
+        jsonEvent({
+          type: 'booking-confirmed',
+          data: { step: 2 },
+        }),
+        {
+          streamState: STREAM_EXISTS,
+        },
+      );
+
+      expect(appendResult).toMatchObject({
+        success: true,
+        nextExpectedRevision: 1n,
+      });
+    });
+
+    it('treats an empty append as a no-op on an existing stream', async () => {
+      const streamName = createStreamName('append-empty-existing');
+
+      const createResult = await backend.getClient().appendToStream(
+        streamName,
+        jsonEvent({
+          type: 'booking-created',
+          data: { step: 1 },
+        }),
+      );
+
+      expect(createResult).toMatchObject({
+        success: true,
+        nextExpectedRevision: 0n,
+      });
+
+      const emptyAppendResult = await backend
+        .getClient()
+        .appendToStream(streamName, [], {
+          streamState: 0n,
+        });
+
+      expect(emptyAppendResult).toMatchObject({
+        success: true,
+        nextExpectedRevision: 0n,
+      });
+
+      expect(await readStreamEvents(streamName)).toEqual([
+        {
+          type: 'booking-created',
+          data: { step: 1 },
+        },
+      ]);
+    });
+
+    it('treats an empty append as a no-op on a missing stream', async () => {
+      const streamName = createStreamName('append-empty-missing');
+
+      const emptyAppendResult = await backend
+        .getClient()
+        .appendToStream(streamName, [], {
+          streamState: NO_STREAM,
+        });
+
+      expect(emptyAppendResult).toMatchObject({
+        success: true,
+      });
+
+      await expect(readStreamEvents(streamName)).rejects.toBeInstanceOf(
+        StreamNotFoundError,
+      );
+    });
+
     it('returns stream not found when reading a missing stream', async () => {
       const streamName = createStreamName('missing-stream');
 
@@ -296,6 +450,56 @@ export function registerStreamsContractSuite(
           type: 'booking-confirmed',
           data: { step: 2 },
         },
+        {
+          type: 'booking-created',
+          data: { step: 1 },
+        },
+      ]);
+    });
+
+    it('handles explicit revision 0 correctly for append and read boundaries', async () => {
+      const streamName = createStreamName('revision-zero');
+
+      const firstAppend = await backend.getClient().appendToStream(
+        streamName,
+        jsonEvent({
+          type: 'booking-created',
+          data: { step: 1 },
+        }),
+        {
+          streamState: NO_STREAM,
+        },
+      );
+
+      expect(firstAppend).toMatchObject({
+        success: true,
+        nextExpectedRevision: 0n,
+      });
+
+      const secondAppend = await backend.getClient().appendToStream(
+        streamName,
+        jsonEvent({
+          type: 'booking-confirmed',
+          data: { step: 2 },
+        }),
+        {
+          streamState: 0n,
+        },
+      );
+
+      expect(secondAppend).toMatchObject({
+        success: true,
+        nextExpectedRevision: 1n,
+      });
+
+      expect(await readStreamEvents(streamName, FORWARDS, 0n, 1)).toEqual([
+        {
+          type: 'booking-created',
+          data: { step: 1 },
+        },
+      ]);
+
+      expect(await readStreamEvents(streamName, BACKWARDS, 0n, 1)).toEqual([
         {
           type: 'booking-created',
           data: { step: 1 },
