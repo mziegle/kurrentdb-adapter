@@ -9,7 +9,7 @@ import {
 import { join } from 'node:path';
 import { AppModule } from '../../src/app.module';
 import { getFreePort } from '../util/get-free-port';
-import { StreamsContractBackend } from './streams-contract-suite';
+import { StreamsContractBackend } from './contract-test-context';
 
 export async function setupAdapterBackend(): Promise<StreamsContractBackend> {
   let app: INestMicroservice;

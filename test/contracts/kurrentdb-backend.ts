@@ -1,6 +1,6 @@
 import { KurrentDBClient } from '@kurrent/kurrentdb-client';
 import { GenericContainer, StartedTestContainer, Wait } from 'testcontainers';
-import { StreamsContractBackend } from './streams-contract-suite';
+import { StreamsContractBackend } from './contract-test-context';
 
 const DEFAULT_KURRENTDB_GRPC_PORT = 2113;
 
