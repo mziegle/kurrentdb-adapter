@@ -232,5 +232,165 @@ export function registerSubscriptionContractSuite(
         secondSubscription.unsubscribe(),
       ]);
     });
+
+    it('keeps a $all subscription open after catch-up and emits newly appended events', async () => {
+      const firstStreamName = context.createStreamName('all-live-first');
+      const secondStreamName = context.createStreamName('all-live-second');
+
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          firstStreamName,
+          jsonEvent({
+            type: 'booking-created',
+            data: { step: 1 },
+          }),
+        );
+
+      const subscription = context.backend().getClient().subscribeToAll({
+        fromPosition: END,
+      });
+
+      await once(subscription, 'caughtUp');
+
+      const iterator = subscription[Symbol.asyncIterator]();
+      let settled = false;
+      const nextEventPromise = iterator.next().then((result) => {
+        settled = true;
+        return result;
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(settled).toBe(false);
+
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          secondStreamName,
+          jsonEvent({
+            type: 'booking-confirmed',
+            data: { step: 2 },
+          }),
+        );
+
+      await expect(nextEventPromise).resolves.toMatchObject({
+        done: false,
+        value: {
+          event: {
+            streamId: secondStreamName,
+            type: 'booking-confirmed',
+            data: { step: 2 },
+          },
+        },
+      });
+
+      await subscription.unsubscribe();
+    });
+
+    it('catches up a $all subscription from start and then continues delivering live events', async () => {
+      const firstStreamName = context.createStreamName('all-start-first');
+      const secondStreamName = context.createStreamName('all-start-second');
+
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          firstStreamName,
+          jsonEvent({
+            type: 'booking-created',
+            data: { step: 1 },
+          }),
+        );
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          secondStreamName,
+          jsonEvent({
+            type: 'booking-confirmed',
+            data: { step: 2 },
+          }),
+        );
+
+      const subscription = context.backend().getClient().subscribeToAll({
+        fromPosition: START,
+      });
+      const iterator = subscription[Symbol.asyncIterator]();
+
+      await expect(
+        nextEventForStream(iterator, firstStreamName),
+      ).resolves.toMatchObject({
+        event: {
+          streamId: firstStreamName,
+          type: 'booking-created',
+          data: { step: 1 },
+        },
+      });
+
+      await expect(
+        nextEventForStream(iterator, secondStreamName),
+      ).resolves.toMatchObject({
+        event: {
+          streamId: secondStreamName,
+          type: 'booking-confirmed',
+          data: { step: 2 },
+        },
+      });
+
+      await once(subscription, 'caughtUp');
+
+      const thirdStreamName = context.createStreamName('all-start-third');
+      const liveEventPromise = iterator.next();
+
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          thirdStreamName,
+          jsonEvent({
+            type: 'booking-completed',
+            data: { step: 3 },
+          }),
+        );
+
+      await expect(liveEventPromise).resolves.toMatchObject({
+        done: false,
+        value: {
+          event: {
+            streamId: thirdStreamName,
+            type: 'booking-completed',
+            data: { step: 3 },
+          },
+        },
+      });
+
+      await subscription.unsubscribe();
+    });
   });
+}
+
+async function nextEventForStream(
+  iterator: AsyncIterator<unknown>,
+  streamId: string,
+): Promise<unknown> {
+  while (true) {
+    const result = await iterator.next();
+    if (result.done) {
+      throw new Error(`Subscription completed before receiving ${streamId}.`);
+    }
+
+    if (
+      typeof result.value === 'object' &&
+      result.value !== null &&
+      'event' in result.value &&
+      typeof result.value.event === 'object' &&
+      result.value.event !== null &&
+      'streamId' in result.value.event &&
+      result.value.event.streamId === streamId
+    ) {
+      return result.value;
+    }
+  }
 }

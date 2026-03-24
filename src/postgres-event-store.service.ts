@@ -53,6 +53,7 @@ export class StreamDeletedServiceError extends Error {
 export class PostgresEventStoreService
   implements OnModuleInit, OnModuleDestroy
 {
+  private static readonly ALL_STREAM_KEY = '$all';
   private readonly pool = new Pool(this.getPoolConfig());
   private readonly streamVersions = new Map<string, number>();
   private readonly streamListeners = new Map<string, Set<() => void>>();
@@ -284,19 +285,27 @@ export class PostgresEventStoreService
 
   async read(request: ReadReq): Promise<ReadResp[]> {
     const options = request.options;
-    if (!options?.stream?.streamIdentifier?.streamName) {
-      throw new Error('Only stream reads are currently supported.');
+    if (!options) {
+      throw new Error('Read request must include options.');
     }
 
     if (options.filter) {
       throw new Error('Filtered reads are not supported.');
     }
 
-    const streamName = this.decodeStreamName(
-      options.stream.streamIdentifier.streamName,
-    );
-    await this.ensureStreamIsNotTombstoned(streamName);
-    return this.readSnapshot(streamName, options);
+    if (options.stream?.streamIdentifier?.streamName) {
+      const streamName = this.decodeStreamName(
+        options.stream.streamIdentifier.streamName,
+      );
+      await this.ensureStreamIsNotTombstoned(streamName);
+      return this.readStreamSnapshot(streamName, options);
+    }
+
+    if (options.all) {
+      return this.readAllSnapshot(options);
+    }
+
+    throw new Error('Only stream and $all reads are currently supported.');
   }
 
   async *subscribeToStream(
@@ -304,8 +313,8 @@ export class PostgresEventStoreService
     isCancelled: () => boolean,
   ): AsyncGenerator<ReadResp> {
     const options = request.options;
-    if (!options?.stream?.streamIdentifier?.streamName) {
-      throw new Error('Only stream reads are currently supported.');
+    if (!options) {
+      throw new Error('Read request must include options.');
     }
 
     if (!options.subscription) {
@@ -320,18 +329,37 @@ export class PostgresEventStoreService
       throw new Error('Backwards subscriptions are not supported.');
     }
 
-    const streamName = this.decodeStreamName(
-      options.stream.streamIdentifier.streamName,
-    );
-    await this.ensureStreamIsNotTombstoned(streamName);
-
     yield {
       confirmation: {
         subscriptionId: randomUUID(),
       },
     };
 
-    let nextRevisionExclusive = await this.resolveSubscriptionBoundary(
+    if (options.stream?.streamIdentifier?.streamName) {
+      const streamName = this.decodeStreamName(
+        options.stream.streamIdentifier.streamName,
+      );
+      await this.ensureStreamIsNotTombstoned(streamName);
+      yield* this.subscribeToSingleStream(streamName, options, isCancelled);
+      return;
+    }
+
+    if (options.all) {
+      yield* this.subscribeToAll(options, isCancelled);
+      return;
+    }
+
+    throw new Error(
+      'Only stream and $all subscriptions are currently supported.',
+    );
+  }
+
+  private async *subscribeToSingleStream(
+    streamName: string,
+    options: NonNullable<ReadReq['options']>,
+    isCancelled: () => boolean,
+  ): AsyncGenerator<ReadResp> {
+    let nextRevisionExclusive = await this.resolveStreamSubscriptionBoundary(
       streamName,
       options,
     );
@@ -339,7 +367,7 @@ export class PostgresEventStoreService
 
     while (!isCancelled()) {
       const versionBeforeRead = this.getStreamVersion(streamName);
-      const rows = await this.readSubscriptionRows(
+      const rows = await this.readStreamSubscriptionRows(
         streamName,
         nextRevisionExclusive,
       );
@@ -374,6 +402,64 @@ export class PostgresEventStoreService
 
       await this.waitForStreamUpdate(
         streamName,
+        versionBeforeRead,
+        isCancelled,
+      );
+    }
+  }
+
+  private async *subscribeToAll(
+    options: NonNullable<ReadReq['options']>,
+    isCancelled: () => boolean,
+  ): AsyncGenerator<ReadResp> {
+    let nextPositionExclusive =
+      await this.resolveAllSubscriptionBoundary(options);
+    let caughtUp = false;
+
+    while (!isCancelled()) {
+      const versionBeforeRead = this.getStreamVersion(
+        PostgresEventStoreService.ALL_STREAM_KEY,
+      );
+      const rows = await this.readAllSubscriptionRows(nextPositionExclusive);
+
+      if (rows.length > 0) {
+        for (const row of rows) {
+          if (isCancelled()) {
+            return;
+          }
+
+          nextPositionExclusive = this.toNumber(row.global_position);
+          yield this.mapRowToReadResponse(row);
+        }
+
+        continue;
+      }
+
+      if (!caughtUp) {
+        yield {
+          caughtUp: {
+            timestamp: this.createTimestamp(),
+            position:
+              nextPositionExclusive >= 0
+                ? {
+                    commitPosition: nextPositionExclusive,
+                    preparePosition: nextPositionExclusive,
+                  }
+                : undefined,
+          },
+        };
+        caughtUp = true;
+      }
+
+      if (
+        versionBeforeRead !==
+        this.getStreamVersion(PostgresEventStoreService.ALL_STREAM_KEY)
+      ) {
+        continue;
+      }
+
+      await this.waitForStreamUpdate(
+        PostgresEventStoreService.ALL_STREAM_KEY,
         versionBeforeRead,
         isCancelled,
       );
@@ -551,7 +637,7 @@ export class PostgresEventStoreService
     return this.toNumber(result.rows[0].stream_revision);
   }
 
-  private async readSnapshot(
+  private async readStreamSnapshot(
     streamName: string,
     options: NonNullable<ReadReq['options']>,
   ): Promise<ReadResp[]> {
@@ -605,7 +691,47 @@ export class PostgresEventStoreService
     return result.rows.map((row) => this.mapRowToReadResponse(row));
   }
 
-  private async resolveSubscriptionBoundary(
+  private async readAllSnapshot(
+    options: NonNullable<ReadReq['options']>,
+  ): Promise<ReadResp[]> {
+    const limit =
+      options.count !== undefined ? this.toNumber(options.count) : 100;
+    const isBackwards = this.isBackwardsRead(options.readDirection);
+    const order = isBackwards ? 'DESC' : 'ASC';
+    const comparator = isBackwards ? '<=' : '>=';
+    const boundary = this.resolveAllReadBoundary(options);
+
+    const params: Array<number> = [];
+    let whereClause = '';
+    if (boundary !== null) {
+      params.push(boundary);
+      whereClause = `WHERE global_position ${comparator} $1`;
+    }
+
+    params.push(limit);
+
+    const result = await this.pool.query<PersistedEventRow>(
+      `
+        SELECT
+          global_position,
+          stream_name,
+          stream_revision,
+          event_id,
+          metadata,
+          custom_metadata,
+          data
+        FROM stream_events
+        ${whereClause}
+        ORDER BY global_position ${order}
+        LIMIT $${params.length}
+      `,
+      params,
+    );
+
+    return result.rows.map((row) => this.mapRowToReadResponse(row));
+  }
+
+  private async resolveStreamSubscriptionBoundary(
     streamName: string,
     options: NonNullable<ReadReq['options']>,
   ): Promise<number> {
@@ -625,7 +751,26 @@ export class PostgresEventStoreService
     return -1;
   }
 
-  private async readSubscriptionRows(
+  private async resolveAllSubscriptionBoundary(
+    options: NonNullable<ReadReq['options']>,
+  ): Promise<number> {
+    const all = options.all;
+    if (!all) {
+      return -1;
+    }
+
+    if (all.position) {
+      return this.toNumber(all.position.commitPosition);
+    }
+
+    if (all.end !== undefined) {
+      return (await this.getCurrentGlobalPosition()) ?? -1;
+    }
+
+    return -1;
+  }
+
+  private async readStreamSubscriptionRows(
     streamName: string,
     nextRevisionExclusive: number,
   ): Promise<PersistedEventRow[]> {
@@ -646,6 +791,30 @@ export class PostgresEventStoreService
         LIMIT 100
       `,
       [streamName, nextRevisionExclusive],
+    );
+
+    return result.rows;
+  }
+
+  private async readAllSubscriptionRows(
+    nextPositionExclusive: number,
+  ): Promise<PersistedEventRow[]> {
+    const result = await this.pool.query<PersistedEventRow>(
+      `
+        SELECT
+          global_position,
+          stream_name,
+          stream_revision,
+          event_id,
+          metadata,
+          custom_metadata,
+          data
+        FROM stream_events
+        WHERE global_position > $1
+        ORDER BY global_position ASC
+        LIMIT 100
+      `,
+      [nextPositionExclusive],
     );
 
     return result.rows;
@@ -686,6 +855,11 @@ export class PostgresEventStoreService
   }
 
   private notifyStreamUpdated(streamName: string): void {
+    this.bumpStreamVersion(streamName);
+    this.bumpStreamVersion(PostgresEventStoreService.ALL_STREAM_KEY);
+  }
+
+  private bumpStreamVersion(streamName: string): void {
     const nextVersion = this.getStreamVersion(streamName) + 1;
     this.streamVersions.set(streamName, nextVersion);
 
@@ -758,6 +932,23 @@ export class PostgresEventStoreService
     );
 
     return result.rows[0]?.exists ?? false;
+  }
+
+  private async getCurrentGlobalPosition(): Promise<number | null> {
+    const result = await this.pool.query<{ global_position: string | number }>(
+      `
+        SELECT global_position
+        FROM stream_events
+        ORDER BY global_position DESC
+        LIMIT 1
+      `,
+    );
+
+    if (result.rows.length === 0) {
+      return null;
+    }
+
+    return this.toNumber(result.rows[0].global_position);
   }
 
   private async ensureStreamIsNotTombstoned(streamName: string): Promise<void> {
@@ -889,6 +1080,33 @@ export class PostgresEventStoreService
     }
 
     if (stream.end !== undefined) {
+      return this.isBackwardsRead(options.readDirection)
+        ? Number.MAX_SAFE_INTEGER
+        : null;
+    }
+
+    return null;
+  }
+
+  private resolveAllReadBoundary(
+    options: NonNullable<ReadReq['options']>,
+  ): number | null {
+    const all = options.all;
+    if (!all) {
+      return null;
+    }
+
+    if (all.position !== undefined) {
+      return this.toNumber(all.position.commitPosition);
+    }
+
+    if (all.start !== undefined) {
+      return this.isBackwardsRead(options.readDirection)
+        ? Number.MAX_SAFE_INTEGER
+        : 0;
+    }
+
+    if (all.end !== undefined) {
       return this.isBackwardsRead(options.readDirection)
         ? Number.MAX_SAFE_INTEGER
         : null;
