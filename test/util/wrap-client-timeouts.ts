@@ -31,14 +31,19 @@ export function wrapClientTimeouts(client: KurrentDBClient): KurrentDBClient {
 }
 
 function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        reject(
-          new Error(`${label} did not complete within ${CLIENT_TIMEOUT_MS}ms.`),
-        );
-      }, CLIENT_TIMEOUT_MS);
-    }),
-  ]);
+  let timeout: NodeJS.Timeout | undefined;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(
+        new Error(`${label} did not complete within ${CLIENT_TIMEOUT_MS}ms.`),
+      );
+    }, CLIENT_TIMEOUT_MS);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  });
 }
