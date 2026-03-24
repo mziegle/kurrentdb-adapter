@@ -1,13 +1,16 @@
 import { KurrentDBClient } from '@kurrent/kurrentdb-client';
 import { GenericContainer, StartedTestContainer, Wait } from 'testcontainers';
+import { wrapClientTimeouts } from '../util/wrap-client-timeouts';
 import { StreamsContractBackend } from './contract-test-context';
 
 const DEFAULT_KURRENTDB_GRPC_PORT = 2113;
 
 function createClient(connectionString: string): KurrentDBClient {
-  return KurrentDBClient.connectionString([
-    connectionString,
-  ] as unknown as TemplateStringsArray);
+  return wrapClientTimeouts(
+    KurrentDBClient.connectionString([
+      connectionString,
+    ] as unknown as TemplateStringsArray),
+  );
 }
 
 async function waitForWarmup(): Promise<void> {
@@ -54,7 +57,9 @@ export async function setupKurrentDbBackend(): Promise<StreamsContractBackend> {
 
     const port = container.getMappedPort(DEFAULT_KURRENTDB_GRPC_PORT);
     await waitForWarmup();
-    client = KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${port}?tls=false`;
+    client = wrapClientTimeouts(
+      KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${port}?tls=false`,
+    );
   }
 
   await startContainer();
@@ -66,7 +71,9 @@ export async function setupKurrentDbBackend(): Promise<StreamsContractBackend> {
       const port = container.getMappedPort(DEFAULT_KURRENTDB_GRPC_PORT);
       await client.dispose();
       await container.restart();
-      client = KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${port}?tls=false`;
+      client = wrapClientTimeouts(
+        KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${port}?tls=false`,
+      );
     },
     dispose: async () => {
       await client?.dispose();

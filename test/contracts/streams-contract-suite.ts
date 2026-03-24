@@ -3,6 +3,7 @@ import {
   StreamsContractBackend,
 } from './contract-test-context';
 import { registerAppendContractSuite } from './suites/append.contract';
+import { registerBatchAppendContractSuite } from './suites/batch-append.contract';
 import { registerDeleteContractSuite } from './suites/delete.contract';
 import { registerReadContractSuite } from './suites/read.contract';
 import { registerRestartContractSuite } from './suites/restart.contract';
@@ -32,6 +33,7 @@ export function registerStreamsContractSuite(
     const context = createStreamsContractContext(backendName, () => backend);
 
     registerAppendContractSuite(context);
+    registerBatchAppendContractSuite(context);
     registerReadContractSuite(context);
     registerSubscriptionContractSuite(context);
     registerRestartContractSuite(context, options);

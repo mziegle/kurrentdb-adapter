@@ -9,6 +9,7 @@ import {
 import { join } from 'node:path';
 import { AppModule } from '../../src/app.module';
 import { getFreePort } from '../util/get-free-port';
+import { wrapClientTimeouts } from '../util/wrap-client-timeouts';
 import { StreamsContractBackend } from './contract-test-context';
 
 export async function setupAdapterBackend(): Promise<StreamsContractBackend> {
@@ -32,8 +33,14 @@ export async function setupAdapterBackend(): Promise<StreamsContractBackend> {
     app = moduleFixture.createNestMicroservice({
       transport: Transport.GRPC,
       options: {
-        package: 'event_store.client.streams',
-        protoPath: join(__dirname, '../../proto/Grpc/streams.proto'),
+        package: [
+          'event_store.client.streams',
+          'event_store.client.server_features',
+        ],
+        protoPath: [
+          join(__dirname, '../../proto/Grpc/streams.proto'),
+          join(__dirname, '../../proto/Grpc/serverfeatures.proto'),
+        ],
         loader: {
           includeDirs: [join(__dirname, '../../proto/Grpc')],
         },
@@ -42,7 +49,9 @@ export async function setupAdapterBackend(): Promise<StreamsContractBackend> {
     });
 
     await app.listen();
-    client = KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${grpcPort}?tls=false`;
+    client = wrapClientTimeouts(
+      KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${grpcPort}?tls=false`,
+    );
   }
 
   process.env.POSTGRES_URL = pgContainer.getConnectionUri();

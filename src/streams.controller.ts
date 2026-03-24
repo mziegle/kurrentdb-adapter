@@ -7,6 +7,7 @@ import {
 import {
   AppendReq,
   AppendResp,
+  BatchAppendReq,
   BatchAppendResp,
   DeleteReq,
   DeleteResp,
@@ -22,6 +23,7 @@ import {
 } from './postgres-event-store.service';
 import {
   Metadata,
+  ServerDuplexStream,
   ServerReadableStream,
   ServerWritableStream,
   sendUnaryData,
@@ -129,8 +131,45 @@ export class StreamsController {
   }
 
   @GrpcStreamCall('Streams', 'batchAppend')
-  batchAppend(): Observable<BatchAppendResp> {
-    throw new Error('Method not implemented.');
+  batchAppend(call: ServerDuplexStream<BatchAppendReq, BatchAppendResp>): void {
+    let pendingMessages: BatchAppendReq[] = [];
+    let chain = Promise.resolve();
+    let streamEnded = false;
+
+    call.on('data', (message: BatchAppendReq) => {
+      pendingMessages.push(message);
+
+      if (!message.isFinal) {
+        return;
+      }
+
+      const requestGroup = pendingMessages;
+      pendingMessages = [];
+
+      chain = chain
+        .then(async () => {
+          const response = await this.eventStore.batchAppend(requestGroup);
+          call.write(response);
+        })
+        .catch((error: unknown) => {
+          call.destroy(this.mapServiceError(error));
+        });
+    });
+
+    call.on('end', () => {
+      streamEnded = true;
+      void chain.finally(() => {
+        if (!call.destroyed) {
+          call.end();
+        }
+      });
+    });
+
+    call.on('error', (error) => {
+      if (!call.destroyed && !streamEnded) {
+        call.destroy(error);
+      }
+    });
   }
 
   private mapServiceError(error: unknown): Error {

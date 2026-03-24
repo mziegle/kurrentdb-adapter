@@ -1,11 +1,20 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Metadata, status } from '@grpc/grpc-js';
+import {
+  Empty as GrpcEmpty,
+  StreamDeleted as GrpcStreamDeleted,
+  StreamIdentifier as GrpcStreamIdentifier,
+  WrongExpectedVersion as GrpcWrongExpectedVersion,
+} from '@kurrent/kurrentdb-client/generated/kurrentdb/protocols/v1/shared_pb';
 import { randomUUID } from 'node:crypto';
 import { Pool, PoolClient } from 'pg';
 import {
   AppendReq,
   AppendReq_ProposedMessage,
   AppendResp,
+  BatchAppendReq,
+  BatchAppendReq_Options,
+  BatchAppendResp,
   DeleteReq,
   DeleteResp,
   ReadReq,
@@ -14,6 +23,8 @@ import {
   TombstoneReq,
   TombstoneResp,
 } from './interfaces/streams';
+import { Code } from './interfaces/code';
+import { Any } from './interfaces/google/protobuf/any';
 import { Timestamp } from './interfaces/google/protobuf/timestamp';
 
 type PersistedEventRow = {
@@ -179,6 +190,96 @@ export class PostgresEventStoreService
     } finally {
       client.release();
     }
+  }
+
+  async batchAppend(requests: BatchAppendReq[]): Promise<BatchAppendResp> {
+    const firstRequest = requests[0];
+    const options = requests.find((request) => request.options)?.options;
+
+    if (!firstRequest?.correlationId) {
+      throw new Error('Batch append request must include a correlation id.');
+    }
+
+    if (!options?.streamIdentifier?.streamName) {
+      throw new Error('Batch append request must include stream options.');
+    }
+
+    const appendMessages: AppendReq[] = [
+      {
+        options: {
+          streamIdentifier: options.streamIdentifier,
+          revision: options.streamPosition,
+          noStream: options.noStream ? {} : undefined,
+          any: options.any ? {} : undefined,
+          streamExists: options.streamExists ? {} : undefined,
+        },
+      },
+      ...requests.flatMap((request) =>
+        (request.proposedMessages ?? []).map((message) => ({
+          proposedMessage: this.mapBatchProposedMessage(message),
+        })),
+      ),
+    ];
+
+    let appendResponse: AppendResp;
+
+    try {
+      appendResponse = await this.append(appendMessages);
+    } catch (error) {
+      if (error instanceof StreamDeletedServiceError) {
+        return {
+          correlationId: firstRequest.correlationId,
+          streamIdentifier: options.streamIdentifier,
+          streamPosition: options.streamPosition,
+          noStream: options.noStream ? {} : undefined,
+          any: options.any ? {} : undefined,
+          streamExists: options.streamExists ? {} : undefined,
+          error: this.createBatchAppendStreamDeletedStatus(
+            options.streamIdentifier.streamName,
+          ),
+        };
+      }
+
+      throw error;
+    }
+
+    if (appendResponse.success) {
+      const currentRevision =
+        appendResponse.success.currentRevision ??
+        (appendResponse.success.noStream ? -1 : undefined);
+
+      return {
+        correlationId: firstRequest.correlationId,
+        streamIdentifier: options.streamIdentifier,
+        streamPosition: options.streamPosition,
+        noStream: options.noStream ? {} : undefined,
+        any: options.any ? {} : undefined,
+        streamExists: options.streamExists ? {} : undefined,
+        success: {
+          currentRevision,
+          position: appendResponse.success.position
+            ? {
+                commitPosition: appendResponse.success.position.commitPosition,
+                preparePosition:
+                  appendResponse.success.position.preparePosition,
+              }
+            : undefined,
+        },
+      };
+    }
+
+    return {
+      correlationId: firstRequest.correlationId,
+      streamIdentifier: options.streamIdentifier,
+      streamPosition: options.streamPosition,
+      noStream: options.noStream ? {} : undefined,
+      any: options.any ? {} : undefined,
+      streamExists: options.streamExists ? {} : undefined,
+      error: this.createBatchAppendWrongExpectedVersionStatus(
+        options,
+        appendResponse.wrongExpectedVersion!,
+      ),
+    };
   }
 
   async read(request: ReadReq): Promise<ReadResp[]> {
@@ -844,6 +945,83 @@ export class PostgresEventStoreService
     }
 
     return id.string;
+  }
+
+  private mapBatchProposedMessage(
+    message: BatchAppendReq['proposedMessages'][number],
+  ): AppendReq_ProposedMessage {
+    return {
+      id: message.id,
+      metadata: message.metadata,
+      customMetadata: message.customMetadata,
+      data: message.data,
+    };
+  }
+
+  private createBatchAppendWrongExpectedVersionStatus(
+    options: BatchAppendReq_Options,
+    wrongExpectedVersion: NonNullable<AppendResp['wrongExpectedVersion']>,
+  ): BatchAppendResp['error'] {
+    const details = new GrpcWrongExpectedVersion();
+
+    if (wrongExpectedVersion.currentRevision !== undefined) {
+      details.setCurrentStreamRevision(
+        String(wrongExpectedVersion.currentRevision),
+      );
+    } else {
+      details.setCurrentNoStream(new GrpcEmpty());
+    }
+
+    if (options.streamPosition !== undefined) {
+      details.setExpectedStreamPosition(String(options.streamPosition));
+    } else if (options.any) {
+      details.setExpectedAny(new GrpcEmpty());
+    } else if (options.streamExists) {
+      details.setExpectedStreamExists(new GrpcEmpty());
+    } else {
+      details.setExpectedNoStream(new GrpcEmpty());
+    }
+
+    return {
+      code: Code.UNKNOWN,
+      message: 'Wrong expected version.',
+      details: this.createStatusDetails(
+        'event_store.client.WrongExpectedVersion',
+        details.serializeBinary(),
+      ),
+    };
+  }
+
+  private createBatchAppendStreamDeletedStatus(
+    streamName: Uint8Array,
+  ): BatchAppendResp['error'] {
+    const details = new GrpcStreamDeleted();
+    const streamIdentifier = new GrpcStreamIdentifier();
+
+    streamIdentifier.setStreamName(streamName);
+    details.setStreamIdentifier(streamIdentifier);
+
+    return {
+      code: Code.UNKNOWN,
+      message: 'Stream deleted.',
+      details: this.createStatusDetails(
+        'event_store.client.StreamDeleted',
+        details.serializeBinary(),
+      ),
+    };
+  }
+
+  private createStatusDetails(
+    typeName: string,
+    value: Uint8Array,
+  ): Any & { type_url: string } {
+    const typeUrl = `type.googleapis.com/${typeName}`;
+
+    return {
+      typeUrl,
+      type_url: typeUrl,
+      value: Buffer.from(value),
+    };
   }
 
   private toNumber(value: string | number | LongLike): number {
