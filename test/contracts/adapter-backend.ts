@@ -33,7 +33,10 @@ export async function setupAdapterBackend(): Promise<StreamsContractBackend> {
       transport: Transport.GRPC,
       options: {
         package: 'event_store.client.streams',
-        protoPath: join(__dirname, '../../proto/streams.proto'),
+        protoPath: join(__dirname, '../../proto/Grpc/streams.proto'),
+        loader: {
+          includeDirs: [join(__dirname, '../../proto/Grpc')],
+        },
         url: `127.0.0.1:${grpcPort}`,
       },
     });

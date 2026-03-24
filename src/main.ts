@@ -13,7 +13,10 @@ async function bootstrap() {
       options: {
         url: grpcUrl,
         package: 'event_store.client.streams',
-        protoPath: join(__dirname, 'proto/streams.proto'),
+        protoPath: join(__dirname, 'proto/Grpc/streams.proto'),
+        loader: {
+          includeDirs: [join(__dirname, 'proto/Grpc')],
+        },
       },
     },
   );

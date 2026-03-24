@@ -5,10 +5,10 @@
 // source: hero.proto
 
 /* eslint-disable */
-import { GrpcMethod, GrpcStreamMethod } from "@nestjs/microservices";
-import { Observable } from "rxjs";
+import { GrpcMethod, GrpcStreamMethod } from '@nestjs/microservices';
+import { Observable } from 'rxjs';
 
-export const protobufPackage = "hero";
+export const protobufPackage = 'hero';
 
 /** hero/hero.proto */
 
@@ -21,7 +21,7 @@ export interface Hero {
   name: string;
 }
 
-export const HERO_PACKAGE_NAME = "hero";
+export const HERO_PACKAGE_NAME = 'hero';
 
 export interface HeroesServiceClient {
   findOne(request: HeroById): Observable<Hero>;
@@ -33,17 +33,31 @@ export interface HeroesServiceController {
 
 export function HeroesServiceControllerMethods() {
   return function (constructor: Function) {
-    const grpcMethods: string[] = ["findOne"];
+    const grpcMethods: string[] = ['findOne'];
     for (const method of grpcMethods) {
-      const descriptor: any = Reflect.getOwnPropertyDescriptor(constructor.prototype, method);
-      GrpcMethod("HeroesService", method)(constructor.prototype[method], method, descriptor);
+      const descriptor: any = Reflect.getOwnPropertyDescriptor(
+        constructor.prototype,
+        method,
+      );
+      GrpcMethod('HeroesService', method)(
+        constructor.prototype[method],
+        method,
+        descriptor,
+      );
     }
     const grpcStreamMethods: string[] = [];
     for (const method of grpcStreamMethods) {
-      const descriptor: any = Reflect.getOwnPropertyDescriptor(constructor.prototype, method);
-      GrpcStreamMethod("HeroesService", method)(constructor.prototype[method], method, descriptor);
+      const descriptor: any = Reflect.getOwnPropertyDescriptor(
+        constructor.prototype,
+        method,
+      );
+      GrpcStreamMethod('HeroesService', method)(
+        constructor.prototype[method],
+        method,
+        descriptor,
+      );
     }
   };
 }
 
-export const HEROES_SERVICE_NAME = "HeroesService";
+export const HEROES_SERVICE_NAME = 'HeroesService';

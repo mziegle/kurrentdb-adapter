@@ -6,7 +6,7 @@
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
-    "generate": "protoc --proto_path=./proto --ts_proto_out=./src/interfaces ./proto/*.proto --ts_proto_opt=nestJs=true",
+    "generate": "protoc --proto_path=./proto/Grpc --ts_proto_out=./src/interfaces ./proto/Grpc/*.proto --ts_proto_opt=nestJs=true",
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
