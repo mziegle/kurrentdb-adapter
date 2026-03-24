@@ -7,6 +7,11 @@ import {
 } from '@kurrent/kurrentdb-client';
 import { randomUUID } from 'node:crypto';
 
+type ReadAllPosition = {
+  commit: bigint;
+  prepare: bigint;
+};
+
 export type StreamsContractBackend = {
   getClient(): KurrentDBClient;
   restart(): Promise<void>;
@@ -18,6 +23,18 @@ export type StreamsContractContext = {
   backend(): StreamsContractBackend;
   backendName: string;
   createStreamName(suffix: string): string;
+  readAllEvents(
+    direction?: Direction,
+    fromPosition?: ReadAllPosition | typeof START | typeof END,
+    maxCount?: number,
+  ): Promise<
+    Array<{
+      streamId: string;
+      type: string;
+      data: unknown;
+      position?: ReadAllPosition;
+    }>
+  >;
   readStreamEvents(
     streamName: string,
     direction?: Direction,
@@ -41,6 +58,45 @@ export function createStreamsContractContext(
     backendName,
     createStreamName(suffix: string): string {
       return `${createBackendLabel(backendName)}-${suffix}-${randomUUID()}`;
+    },
+    async readAllEvents(
+      direction: Direction = FORWARDS,
+      fromPosition: ReadAllPosition | typeof START | typeof END = START,
+      maxCount = 10,
+    ): Promise<
+      Array<{
+        streamId: string;
+        type: string;
+        data: unknown;
+        position?: ReadAllPosition;
+      }>
+    > {
+      const readEvents = getBackend().getClient().readAll({
+        fromPosition,
+        direction,
+        maxCount,
+      });
+
+      const received: Array<{
+        streamId: string;
+        type: string;
+        data: unknown;
+        position?: ReadAllPosition;
+      }> = [];
+      for await (const { event: readEvent } of readEvents) {
+        if (!readEvent) {
+          continue;
+        }
+
+        received.push({
+          streamId: readEvent.streamId,
+          type: readEvent.type,
+          data: readEvent.data,
+          position: readEvent.position,
+        });
+      }
+
+      return received;
     },
     async readStreamEvents(
       streamName: string,
