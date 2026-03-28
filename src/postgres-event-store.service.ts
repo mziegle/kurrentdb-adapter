@@ -34,6 +34,7 @@ type PersistedEventRow = {
   stream_name: string;
   stream_revision: string | number;
   event_id: string;
+  created_at: Date | string;
   metadata: Record<string, string> | null;
   custom_metadata: Buffer | Uint8Array | null;
   data: Buffer | Uint8Array | null;
@@ -784,6 +785,7 @@ export class PostgresEventStoreService
           events.stream_name,
           events.stream_revision,
           events.event_id,
+          events.created_at,
           events.metadata,
           events.custom_metadata,
           events.data
@@ -841,6 +843,7 @@ export class PostgresEventStoreService
           events.stream_name,
           events.stream_revision,
           events.event_id,
+          events.created_at,
           events.metadata,
           events.custom_metadata,
           events.data
@@ -848,8 +851,6 @@ export class PostgresEventStoreService
         LEFT JOIN stream_retention_policies retention
           ON retention.stream_name = events.stream_name
         ${whereClause}
-          ${whereClause ? 'AND' : 'WHERE'}
-          ${this.buildRetentionVisibilityClause('events', 'retention')}
         ORDER BY events.global_position ${order}
         LIMIT $${params.length}
       `,
@@ -909,6 +910,7 @@ export class PostgresEventStoreService
           events.stream_name,
           events.stream_revision,
           events.event_id,
+          events.created_at,
           events.metadata,
           events.custom_metadata,
           events.data
@@ -946,6 +948,7 @@ export class PostgresEventStoreService
           events.stream_name,
           events.stream_revision,
           events.event_id,
+          events.created_at,
           events.metadata,
           events.custom_metadata,
           events.data
@@ -953,7 +956,6 @@ export class PostgresEventStoreService
         LEFT JOIN stream_retention_policies retention
           ON retention.stream_name = events.stream_name
         WHERE ${whereClauses.join(' AND ')}
-          AND ${this.buildRetentionVisibilityClause('events', 'retention')}
         ORDER BY events.global_position ASC
         LIMIT 100
       `,
@@ -1024,6 +1026,13 @@ export class PostgresEventStoreService
   }
 
   private mapRowToReadResponse(row: PersistedEventRow): ReadResp {
+    const grpcMetadata = {
+      type: row.metadata?.type ?? '<no-event-type-provided>',
+      created: this.toTicksSinceUnixEpoch(row.created_at),
+      'content-type':
+        row.metadata?.['content-type'] ?? 'application/octet-stream',
+    };
+
     return {
       event: {
         event: {
@@ -1034,7 +1043,7 @@ export class PostgresEventStoreService
           streamRevision: this.toNumber(row.stream_revision),
           preparePosition: this.toNumber(row.global_position),
           commitPosition: this.toNumber(row.global_position),
-          metadata: row.metadata ?? {},
+          metadata: grpcMetadata,
           customMetadata: Buffer.from(row.custom_metadata ?? new Uint8Array()),
           data: Buffer.from(row.data ?? new Uint8Array()),
         },
@@ -1051,6 +1060,11 @@ export class PostgresEventStoreService
       seconds: Math.floor(now / 1000),
       nanos: (now % 1000) * 1_000_000,
     };
+  }
+
+  private toTicksSinceUnixEpoch(value: Date | string): string {
+    const date = value instanceof Date ? value : new Date(value);
+    return String(date.getTime() * 10_000);
   }
 
   private getStreamVersion(streamName: string): number {

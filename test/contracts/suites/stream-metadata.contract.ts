@@ -72,6 +72,11 @@ export function registerStreamMetadataContractSuite(
       expect(allEvents).toMatchObject([
         {
           streamId: streamName,
+          type: 'booking-created',
+          data: { step: 1 },
+        },
+        {
+          streamId: streamName,
           type: 'booking-confirmed',
           data: { step: 2 },
         },
@@ -163,11 +168,16 @@ export function registerStreamMetadataContractSuite(
       expect(allEvents).toMatchObject([
         {
           streamId: streamName,
+          type: 'booking-created',
+          data: { step: 1 },
+        },
+        {
+          streamId: streamName,
           type: 'booking-confirmed',
           data: { step: 2 },
         },
       ]);
-      expect(allEvents).toHaveLength(1);
+      expect(allEvents).toHaveLength(2);
     });
   });
 }

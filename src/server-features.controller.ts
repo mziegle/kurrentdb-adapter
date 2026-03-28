@@ -1,6 +1,7 @@
 import { Controller } from '@nestjs/common';
 import { GrpcMethod } from '@nestjs/microservices';
 import { SupportedMethods, SupportedMethod } from './interfaces/serverfeatures';
+import { logHotPath } from './debug-log';
 
 const GOSSIP_SERVICE_NAME = 'event_store.client.gossip.gossip';
 const MONITORING_SERVICE_NAME = 'event_store.client.monitoring.monitoring';
@@ -16,6 +17,7 @@ const USERS_SERVICE_NAME = 'event_store.client.users.users';
 export class ServerFeaturesController {
   @GrpcMethod('ServerFeatures', 'getSupportedMethods')
   getSupportedMethods(): SupportedMethods {
+    logHotPath('gRPC ServerFeatures.GetSupportedMethods');
     return {
       eventStoreServerVersion: '24.0.0',
       methods: [

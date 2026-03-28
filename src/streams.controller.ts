@@ -29,6 +29,7 @@ import {
   sendUnaryData,
   status,
 } from '@grpc/grpc-js';
+import { logHotPath, summarizeGrpcMetadata } from './debug-log';
 
 @Controller()
 export class StreamsController {
@@ -37,9 +38,12 @@ export class StreamsController {
   @GrpcMethod('Streams', 'read')
   read(
     request: ReadReq,
-    _metadata?: Metadata,
+    metadata?: Metadata,
     call?: ServerWritableStream<ReadReq, ReadResp>,
   ): Observable<ReadResp> {
+    logHotPath('gRPC Streams.Read', {
+      detail: summarizeGrpcMetadata(metadata),
+    });
     return new Observable<ReadResp>((subscriber) => {
       let cancelled = false;
       const cancelHandler = () => {
@@ -94,6 +98,9 @@ export class StreamsController {
     call: ServerReadableStream<AppendReq, AppendResp>,
     callback: sendUnaryData<AppendResp>,
   ): void {
+    logHotPath('gRPC Streams.Append', {
+      detail: summarizeGrpcMetadata(call.metadata),
+    });
     const messages: AppendReq[] = [];
 
     call.on('data', (message: AppendReq) => {
@@ -115,7 +122,11 @@ export class StreamsController {
   @GrpcMethod('Streams', 'delete')
   delete(
     request: DeleteReq,
+    metadata?: Metadata,
   ): Promise<DeleteResp> | Observable<DeleteResp> | DeleteResp {
+    logHotPath('gRPC Streams.Delete', {
+      detail: summarizeGrpcMetadata(metadata),
+    });
     return this.eventStore.delete(request).catch((error: unknown) => {
       throw new RpcException(this.mapServiceError(error));
     });
@@ -124,7 +135,11 @@ export class StreamsController {
   @GrpcMethod('Streams', 'tombstone')
   tombstone(
     request: TombstoneReq,
+    metadata?: Metadata,
   ): Promise<TombstoneResp> | Observable<TombstoneResp> | TombstoneResp {
+    logHotPath('gRPC Streams.Tombstone', {
+      detail: summarizeGrpcMetadata(metadata),
+    });
     return this.eventStore.tombstone(request).catch((error: unknown) => {
       throw new RpcException(this.mapServiceError(error));
     });
@@ -132,6 +147,9 @@ export class StreamsController {
 
   @GrpcStreamCall('Streams', 'batchAppend')
   batchAppend(call: ServerDuplexStream<BatchAppendReq, BatchAppendResp>): void {
+    logHotPath('gRPC Streams.BatchAppend', {
+      detail: summarizeGrpcMetadata(call.metadata),
+    });
     let pendingMessages: BatchAppendReq[] = [];
     let chain = Promise.resolve();
     let streamEnded = false;

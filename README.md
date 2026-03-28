@@ -101,6 +101,17 @@ The gRPC listener defaults to `0.0.0.0:2113`. Override it with:
 GRPC_URL=0.0.0.0:2113
 ```
 
+To help debug non-gRPC clients such as Navigator, the adapter now starts the
+actual Nest gRPC server on an internal loopback port and places a lightweight
+TCP probe proxy on `GRPC_URL`. Override the internal target with:
+
+```bash
+INTERNAL_GRPC_URL=127.0.0.1:2213
+```
+
+The probe proxy logs the first bytes of each incoming connection and labels the
+traffic as `http1`, `http2-prior-knowledge`, or `unknown`.
+
 ### Start PostgreSQL for local development
 
 This repo includes a local Postgres stack and a real KurrentDB instance in [docker-compose.yml](c:\Users\micha\Repos\kurrentdb-adapter\docker-compose.yml).
