@@ -18,6 +18,8 @@ import {
   DeleteReq,
   DeleteResp,
   ReadReq,
+  ReadReq_Options_FilterOptions,
+  ReadReq_Options_FilterOptions_Expression,
   ReadReq_Options_ReadDirection,
   ReadResp,
   TombstoneReq,
@@ -42,6 +44,35 @@ type LongLike = {
   high: number;
   unsigned: boolean;
 };
+
+type EmptyMessage = {
+  serializeBinary(): Uint8Array;
+};
+
+type WrongExpectedVersionMessage = {
+  setCurrentStreamRevision(value: string): void;
+  setCurrentNoStream(value: EmptyMessage): void;
+  setExpectedStreamPosition(value: string): void;
+  setExpectedAny(value: EmptyMessage): void;
+  setExpectedStreamExists(value: EmptyMessage): void;
+  setExpectedNoStream(value: EmptyMessage): void;
+  serializeBinary(): Uint8Array;
+};
+
+type StreamIdentifierMessage = {
+  setStreamName(value: Uint8Array | string): void;
+};
+
+type StreamDeletedMessage = {
+  setStreamIdentifier(value: StreamIdentifierMessage): void;
+  serializeBinary(): Uint8Array;
+};
+
+type EmptyMessageConstructor = new () => EmptyMessage;
+type WrongExpectedVersionMessageConstructor =
+  new () => WrongExpectedVersionMessage;
+type StreamIdentifierMessageConstructor = new () => StreamIdentifierMessage;
+type StreamDeletedMessageConstructor = new () => StreamDeletedMessage;
 
 export class StreamDeletedServiceError extends Error {
   constructor(readonly streamName: string) {
@@ -289,11 +320,11 @@ export class PostgresEventStoreService
       throw new Error('Read request must include options.');
     }
 
-    if (options.filter) {
-      throw new Error('Filtered reads are not supported.');
-    }
-
     if (options.stream?.streamIdentifier?.streamName) {
+      if (options.filter) {
+        throw new Error('Filtered reads are only supported on $all.');
+      }
+
       const streamName = this.decodeStreamName(
         options.stream.streamIdentifier.streamName,
       );
@@ -321,10 +352,6 @@ export class PostgresEventStoreService
       throw new Error('Subscription reads must include subscription options.');
     }
 
-    if (options.filter) {
-      throw new Error('Filtered reads are not supported.');
-    }
-
     if (this.isBackwardsRead(options.readDirection)) {
       throw new Error('Backwards subscriptions are not supported.');
     }
@@ -336,6 +363,10 @@ export class PostgresEventStoreService
     };
 
     if (options.stream?.streamIdentifier?.streamName) {
+      if (options.filter) {
+        throw new Error('Filtered reads are only supported on $all.');
+      }
+
       const streamName = this.decodeStreamName(
         options.stream.streamIdentifier.streamName,
       );
@@ -420,7 +451,10 @@ export class PostgresEventStoreService
       const versionBeforeRead = this.getStreamVersion(
         PostgresEventStoreService.ALL_STREAM_KEY,
       );
-      const rows = await this.readAllSubscriptionRows(nextPositionExclusive);
+      const rows = await this.readAllSubscriptionRows(
+        nextPositionExclusive,
+        options.filter,
+      );
 
       if (rows.length > 0) {
         for (const row of rows) {
@@ -436,14 +470,22 @@ export class PostgresEventStoreService
       }
 
       if (!caughtUp) {
+        const caughtUpPosition = options.filter
+          ? await this.getCurrentGlobalPosition()
+          : nextPositionExclusive;
+        nextPositionExclusive = Math.max(
+          nextPositionExclusive,
+          caughtUpPosition ?? -1,
+        );
+
         yield {
           caughtUp: {
             timestamp: this.createTimestamp(),
             position:
-              nextPositionExclusive >= 0
+              caughtUpPosition !== null && caughtUpPosition >= 0
                 ? {
-                    commitPosition: nextPositionExclusive,
-                    preparePosition: nextPositionExclusive,
+                    commitPosition: caughtUpPosition,
+                    preparePosition: caughtUpPosition,
                   }
                 : undefined,
           },
@@ -701,14 +743,21 @@ export class PostgresEventStoreService
     const comparator = isBackwards ? '<=' : '>=';
     const boundary = this.resolveAllReadBoundary(options);
 
-    const params: Array<number> = [];
-    let whereClause = '';
+    const params: Array<number | string> = [];
+    const whereClauses: string[] = [];
     if (boundary !== null) {
       params.push(boundary);
-      whereClause = `WHERE global_position ${comparator} $1`;
+      whereClauses.push(`global_position ${comparator} $${params.length}`);
+    }
+
+    if (options.filter) {
+      const filterClause = this.buildReadFilterClause(options.filter, params);
+      whereClauses.push(filterClause.sql);
     }
 
     params.push(limit);
+    const whereClause =
+      whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
     const result = await this.pool.query<PersistedEventRow>(
       `
@@ -798,7 +847,16 @@ export class PostgresEventStoreService
 
   private async readAllSubscriptionRows(
     nextPositionExclusive: number,
+    filter?: ReadReq_Options_FilterOptions,
   ): Promise<PersistedEventRow[]> {
+    const params: Array<number | string> = [nextPositionExclusive];
+    const whereClauses = [`global_position > $1`];
+
+    if (filter) {
+      const filterClause = this.buildReadFilterClause(filter, params);
+      whereClauses.push(filterClause.sql);
+    }
+
     const result = await this.pool.query<PersistedEventRow>(
       `
         SELECT
@@ -810,14 +868,67 @@ export class PostgresEventStoreService
           custom_metadata,
           data
         FROM stream_events
-        WHERE global_position > $1
+        WHERE ${whereClauses.join(' AND ')}
         ORDER BY global_position ASC
         LIMIT 100
       `,
-      [nextPositionExclusive],
+      params,
     );
 
     return result.rows;
+  }
+
+  private buildReadFilterClause(
+    filter: ReadReq_Options_FilterOptions,
+    params: Array<number | string>,
+  ): { sql: string } {
+    const { columnSql, expression } = this.resolveReadFilterTarget(filter);
+    const prefixes = expression.prefix.filter((prefix) => prefix.length > 0);
+
+    if (prefixes.length > 0) {
+      const likePredicates = prefixes.map((prefix) => {
+        params.push(`${prefix}%`);
+        return `${columnSql} LIKE $${params.length}`;
+      });
+
+      return {
+        sql: `(${likePredicates.join(' OR ')})`,
+      };
+    }
+
+    if (expression.regex.length > 0) {
+      params.push(expression.regex);
+      return {
+        sql: `${columnSql} ~ $${params.length}`,
+      };
+    }
+
+    throw new Error(
+      'Read filters must include a stream name or event type regex/prefix.',
+    );
+  }
+
+  private resolveReadFilterTarget(filter: ReadReq_Options_FilterOptions): {
+    columnSql: string;
+    expression: ReadReq_Options_FilterOptions_Expression;
+  } {
+    if (filter.streamIdentifier) {
+      return {
+        columnSql: 'stream_name',
+        expression: filter.streamIdentifier,
+      };
+    }
+
+    if (filter.eventType) {
+      return {
+        columnSql: "metadata ->> 'type'",
+        expression: filter.eventType,
+      };
+    }
+
+    throw new Error(
+      'Read filters must target a stream identifier or event type.',
+    );
   }
 
   private mapRowToReadResponse(row: PersistedEventRow): ReadResp {
@@ -1180,24 +1291,27 @@ export class PostgresEventStoreService
     options: BatchAppendReq_Options,
     wrongExpectedVersion: NonNullable<AppendResp['wrongExpectedVersion']>,
   ): BatchAppendResp['error'] {
-    const details = new GrpcWrongExpectedVersion();
+    const WrongExpectedVersion =
+      GrpcWrongExpectedVersion as unknown as WrongExpectedVersionMessageConstructor;
+    const Empty = GrpcEmpty as unknown as EmptyMessageConstructor;
+    const details = new WrongExpectedVersion();
 
     if (wrongExpectedVersion.currentRevision !== undefined) {
       details.setCurrentStreamRevision(
         String(wrongExpectedVersion.currentRevision),
       );
     } else {
-      details.setCurrentNoStream(new GrpcEmpty());
+      details.setCurrentNoStream(new Empty());
     }
 
     if (options.streamPosition !== undefined) {
       details.setExpectedStreamPosition(String(options.streamPosition));
     } else if (options.any) {
-      details.setExpectedAny(new GrpcEmpty());
+      details.setExpectedAny(new Empty());
     } else if (options.streamExists) {
-      details.setExpectedStreamExists(new GrpcEmpty());
+      details.setExpectedStreamExists(new Empty());
     } else {
-      details.setExpectedNoStream(new GrpcEmpty());
+      details.setExpectedNoStream(new Empty());
     }
 
     return {
@@ -1213,8 +1327,12 @@ export class PostgresEventStoreService
   private createBatchAppendStreamDeletedStatus(
     streamName: Uint8Array,
   ): BatchAppendResp['error'] {
-    const details = new GrpcStreamDeleted();
-    const streamIdentifier = new GrpcStreamIdentifier();
+    const StreamDeleted =
+      GrpcStreamDeleted as unknown as StreamDeletedMessageConstructor;
+    const StreamIdentifier =
+      GrpcStreamIdentifier as unknown as StreamIdentifierMessageConstructor;
+    const details = new StreamDeleted();
+    const streamIdentifier = new StreamIdentifier();
 
     streamIdentifier.setStreamName(streamName);
     details.setStreamIdentifier(streamIdentifier);

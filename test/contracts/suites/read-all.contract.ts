@@ -3,6 +3,7 @@ import {
   END,
   FORWARDS,
   START,
+  streamNameFilter,
   jsonEvent,
 } from '@kurrent/kurrentdb-client';
 import { StreamsContractContext } from '../contract-test-context';
@@ -215,5 +216,96 @@ export function registerReadAllContractSuite(
       expect(forwardEvents).toHaveLength(2);
       expect(backwardEvents).toHaveLength(2);
     });
+
+    it('filters $all reads by stream name prefix', async () => {
+      const includedPrefix = context.createStreamName('read-all-filter');
+      const includedFirstStream = `${includedPrefix}-first`;
+      const includedSecondStream = `${includedPrefix}-second`;
+      const excludedStream = context.createStreamName('read-all-excluded');
+
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          includedFirstStream,
+          jsonEvent({
+            type: 'booking-created',
+            data: { step: 1 },
+          }),
+        );
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          excludedStream,
+          jsonEvent({
+            type: 'booking-ignored',
+            data: { step: 2 },
+          }),
+        );
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          includedSecondStream,
+          jsonEvent({
+            type: 'booking-confirmed',
+            data: { step: 3 },
+          }),
+        );
+
+      const filteredEvents = await readAllMatchingEvents(
+        context,
+        streamNameFilter({
+          prefixes: [includedPrefix],
+        }),
+      );
+
+      expect(filteredEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            streamId: includedFirstStream,
+            type: 'booking-created',
+            data: { step: 1 },
+          }),
+          expect.objectContaining({
+            streamId: includedSecondStream,
+            type: 'booking-confirmed',
+            data: { step: 3 },
+          }),
+        ]),
+      );
+      expect(
+        filteredEvents.some((event) => event.streamId === excludedStream),
+      ).toBe(false);
+      expect(filteredEvents).toHaveLength(2);
+    });
   });
+}
+
+async function readAllMatchingEvents(
+  context: StreamsContractContext,
+  filter: ReturnType<typeof streamNameFilter>,
+): Promise<Array<{ streamId: string; type: string; data: unknown }>> {
+  const events = context.backend().getClient().readAll({
+    fromPosition: START,
+    direction: FORWARDS,
+    maxCount: 500,
+    filter,
+  });
+
+  const received: Array<{ streamId: string; type: string; data: unknown }> = [];
+  for await (const { event } of events) {
+    if (!event) {
+      continue;
+    }
+
+    received.push({
+      streamId: event.streamId,
+      type: event.type,
+      data: event.data,
+    });
+  }
+
+  return received;
 }

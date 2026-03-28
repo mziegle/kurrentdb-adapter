@@ -1,4 +1,9 @@
-import { END, START, jsonEvent } from '@kurrent/kurrentdb-client';
+import {
+  END,
+  START,
+  streamNameFilter,
+  jsonEvent,
+} from '@kurrent/kurrentdb-client';
 import { once } from 'node:events';
 import { StreamsContractContext } from '../contract-test-context';
 
@@ -362,6 +367,102 @@ export function registerSubscriptionContractSuite(
             streamId: thirdStreamName,
             type: 'booking-completed',
             data: { step: 3 },
+          },
+        },
+      });
+
+      await subscription.unsubscribe();
+    });
+
+    it('filters $all subscriptions by stream name prefix during catch-up and live delivery', async () => {
+      const includedPrefix = context.createStreamName('all-filter');
+      const includedHistoricalStream = `${includedPrefix}-history`;
+      const includedLiveStream = `${includedPrefix}-live`;
+      const excludedStream = context.createStreamName('all-filter-excluded');
+
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          includedHistoricalStream,
+          jsonEvent({
+            type: 'booking-created',
+            data: { step: 1 },
+          }),
+        );
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          excludedStream,
+          jsonEvent({
+            type: 'booking-ignored',
+            data: { step: 2 },
+          }),
+        );
+
+      const subscription = context
+        .backend()
+        .getClient()
+        .subscribeToAll({
+          fromPosition: START,
+          filter: streamNameFilter({
+            prefixes: [includedPrefix],
+          }),
+        });
+      const iterator = subscription[Symbol.asyncIterator]();
+
+      await expect(iterator.next()).resolves.toMatchObject({
+        done: false,
+        value: {
+          event: {
+            streamId: includedHistoricalStream,
+            type: 'booking-created',
+            data: { step: 1 },
+          },
+        },
+      });
+
+      await once(subscription, 'caughtUp');
+
+      let settled = false;
+      const nextEventPromise = iterator.next().then((result) => {
+        settled = true;
+        return result;
+      });
+
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          excludedStream,
+          jsonEvent({
+            type: 'booking-ignored-again',
+            data: { step: 3 },
+          }),
+        );
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(settled).toBe(false);
+
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          includedLiveStream,
+          jsonEvent({
+            type: 'booking-confirmed',
+            data: { step: 4 },
+          }),
+        );
+
+      await expect(nextEventPromise).resolves.toMatchObject({
+        done: false,
+        value: {
+          event: {
+            streamId: includedLiveStream,
+            type: 'booking-confirmed',
+            data: { step: 4 },
           },
         },
       });
