@@ -8,6 +8,7 @@ import { registerDeleteContractSuite } from './suites/delete.contract';
 import { registerReadContractSuite } from './suites/read.contract';
 import { registerReadAllContractSuite } from './suites/read-all.contract';
 import { registerRestartContractSuite } from './suites/restart.contract';
+import { registerStreamMetadataContractSuite } from './suites/stream-metadata.contract';
 import { registerSubscriptionContractSuite } from './suites/subscription.contract';
 import { registerTombstoneContractSuite } from './suites/tombstone.contract';
 
@@ -37,6 +38,7 @@ export function registerStreamsContractSuite(
     registerBatchAppendContractSuite(context);
     registerReadContractSuite(context);
     registerReadAllContractSuite(context);
+    registerStreamMetadataContractSuite(context);
     registerSubscriptionContractSuite(context);
     registerRestartContractSuite(context, options);
     registerDeleteContractSuite(context);

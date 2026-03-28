@@ -39,6 +39,13 @@ type PersistedEventRow = {
   data: Buffer | Uint8Array | null;
 };
 
+type StreamRetentionPolicy = {
+  currentRevision: number | null;
+  maxAge: number | null;
+  maxCount: number | null;
+  truncateBefore: number | null;
+};
+
 type LongLike = {
   low: number;
   high: number;
@@ -116,6 +123,21 @@ export class PostgresEventStoreService
         last_position BIGINT NOT NULL
       )
     `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS stream_retention_policies (
+        stream_name TEXT PRIMARY KEY,
+        current_revision BIGINT NULL,
+        max_age BIGINT NULL,
+        max_count BIGINT NULL,
+        truncate_before BIGINT NULL
+      )
+    `);
+
+    await this.pool.query(`
+      ALTER TABLE stream_retention_policies
+      ADD COLUMN IF NOT EXISTS max_age BIGINT NULL
+    `);
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -138,6 +160,10 @@ export class PostgresEventStoreService
 
     const streamName = this.decodeStreamName(
       options.streamIdentifier.streamName,
+    );
+    const metadataPolicyUpdate = this.parseMetadataPolicyUpdate(
+      streamName,
+      proposedMessages,
     );
 
     await this.ensureStreamIsNotTombstoned(streamName);
@@ -186,6 +212,22 @@ export class PostgresEventStoreService
         );
 
         lastPosition = this.toNumber(result.rows[0].global_position);
+      }
+
+      if (proposedMessages.length > 0 && !this.isMetastream(streamName)) {
+        await this.upsertStreamCurrentRevision(
+          client,
+          streamName,
+          nextRevision,
+        );
+      }
+
+      if (metadataPolicyUpdate) {
+        await this.upsertStreamRetentionPolicy(
+          client,
+          metadataPolicyUpdate.streamName,
+          metadataPolicyUpdate.policy,
+        );
       }
 
       await client.query('COMMIT');
@@ -417,11 +459,18 @@ export class PostgresEventStoreService
       }
 
       if (!caughtUp) {
+        const caughtUpRevision =
+          (await this.getCurrentRevision(this.pool, streamName)) ?? -1;
+        nextRevisionExclusive = Math.max(
+          nextRevisionExclusive,
+          caughtUpRevision,
+        );
+
         yield {
           caughtUp: {
             timestamp: this.createTimestamp(),
             streamRevision:
-              nextRevisionExclusive >= 0 ? nextRevisionExclusive : undefined,
+              caughtUpRevision >= 0 ? caughtUpRevision : undefined,
           },
         };
         caughtUp = true;
@@ -470,9 +519,7 @@ export class PostgresEventStoreService
       }
 
       if (!caughtUp) {
-        const caughtUpPosition = options.filter
-          ? await this.getCurrentGlobalPosition()
-          : nextPositionExclusive;
+        const caughtUpPosition = await this.getCurrentGlobalPosition();
         nextPositionExclusive = Math.max(
           nextPositionExclusive,
           caughtUpPosition ?? -1,
@@ -544,6 +591,15 @@ export class PostgresEventStoreService
           DELETE FROM stream_events
           WHERE stream_name = $1
           RETURNING global_position
+        `,
+        [streamName],
+      );
+
+      await client.query(
+        `
+          UPDATE stream_retention_policies
+          SET current_revision = NULL
+          WHERE stream_name = $1
         `,
         [streamName],
       );
@@ -627,6 +683,15 @@ export class PostgresEventStoreService
         [streamName, lastPosition],
       );
 
+      await client.query(
+        `
+          UPDATE stream_retention_policies
+          SET current_revision = NULL
+          WHERE stream_name = $1
+        `,
+        [streamName],
+      );
+
       await client.query('COMMIT');
 
       return {
@@ -704,10 +769,10 @@ export class PostgresEventStoreService
     const boundary = this.resolveReadBoundary(options);
 
     const params: Array<number | string> = [streamName];
-    let whereClause = 'WHERE stream_name = $1';
+    let whereClause = 'WHERE events.stream_name = $1';
     if (boundary !== null) {
       params.push(boundary);
-      whereClause += ` AND stream_revision ${comparator} $2`;
+      whereClause += ` AND events.stream_revision ${comparator} $2`;
     }
 
     params.push(limit);
@@ -715,16 +780,20 @@ export class PostgresEventStoreService
     const result = await this.pool.query<PersistedEventRow>(
       `
         SELECT
-          global_position,
-          stream_name,
-          stream_revision,
-          event_id,
-          metadata,
-          custom_metadata,
-          data
-        FROM stream_events
+          events.global_position,
+          events.stream_name,
+          events.stream_revision,
+          events.event_id,
+          events.metadata,
+          events.custom_metadata,
+          events.data
+        FROM stream_events events
+        LEFT JOIN stream_retention_policies retention
+          ON retention.stream_name = events.stream_name
         ${whereClause}
-        ORDER BY stream_revision ${order}
+          ${whereClause ? 'AND' : 'WHERE'}
+          ${this.buildRetentionVisibilityClause('events', 'retention')}
+        ORDER BY events.stream_revision ${order}
         LIMIT $${params.length}
       `,
       params,
@@ -747,11 +816,17 @@ export class PostgresEventStoreService
     const whereClauses: string[] = [];
     if (boundary !== null) {
       params.push(boundary);
-      whereClauses.push(`global_position ${comparator} $${params.length}`);
+      whereClauses.push(
+        `events.global_position ${comparator} $${params.length}`,
+      );
     }
 
     if (options.filter) {
-      const filterClause = this.buildReadFilterClause(options.filter, params);
+      const filterClause = this.buildReadFilterClause(
+        options.filter,
+        params,
+        'events',
+      );
       whereClauses.push(filterClause.sql);
     }
 
@@ -762,16 +837,20 @@ export class PostgresEventStoreService
     const result = await this.pool.query<PersistedEventRow>(
       `
         SELECT
-          global_position,
-          stream_name,
-          stream_revision,
-          event_id,
-          metadata,
-          custom_metadata,
-          data
-        FROM stream_events
+          events.global_position,
+          events.stream_name,
+          events.stream_revision,
+          events.event_id,
+          events.metadata,
+          events.custom_metadata,
+          events.data
+        FROM stream_events events
+        LEFT JOIN stream_retention_policies retention
+          ON retention.stream_name = events.stream_name
         ${whereClause}
-        ORDER BY global_position ${order}
+          ${whereClause ? 'AND' : 'WHERE'}
+          ${this.buildRetentionVisibilityClause('events', 'retention')}
+        ORDER BY events.global_position ${order}
         LIMIT $${params.length}
       `,
       params,
@@ -826,17 +905,20 @@ export class PostgresEventStoreService
     const result = await this.pool.query<PersistedEventRow>(
       `
         SELECT
-          global_position,
-          stream_name,
-          stream_revision,
-          event_id,
-          metadata,
-          custom_metadata,
-          data
-        FROM stream_events
-        WHERE stream_name = $1
-          AND stream_revision > $2
-        ORDER BY stream_revision ASC
+          events.global_position,
+          events.stream_name,
+          events.stream_revision,
+          events.event_id,
+          events.metadata,
+          events.custom_metadata,
+          events.data
+        FROM stream_events events
+        LEFT JOIN stream_retention_policies retention
+          ON retention.stream_name = events.stream_name
+        WHERE events.stream_name = $1
+          AND events.stream_revision > $2
+          AND ${this.buildRetentionVisibilityClause('events', 'retention')}
+        ORDER BY events.stream_revision ASC
         LIMIT 100
       `,
       [streamName, nextRevisionExclusive],
@@ -850,26 +932,29 @@ export class PostgresEventStoreService
     filter?: ReadReq_Options_FilterOptions,
   ): Promise<PersistedEventRow[]> {
     const params: Array<number | string> = [nextPositionExclusive];
-    const whereClauses = [`global_position > $1`];
+    const whereClauses = [`events.global_position > $1`];
 
     if (filter) {
-      const filterClause = this.buildReadFilterClause(filter, params);
+      const filterClause = this.buildReadFilterClause(filter, params, 'events');
       whereClauses.push(filterClause.sql);
     }
 
     const result = await this.pool.query<PersistedEventRow>(
       `
         SELECT
-          global_position,
-          stream_name,
-          stream_revision,
-          event_id,
-          metadata,
-          custom_metadata,
-          data
-        FROM stream_events
+          events.global_position,
+          events.stream_name,
+          events.stream_revision,
+          events.event_id,
+          events.metadata,
+          events.custom_metadata,
+          events.data
+        FROM stream_events events
+        LEFT JOIN stream_retention_policies retention
+          ON retention.stream_name = events.stream_name
         WHERE ${whereClauses.join(' AND ')}
-        ORDER BY global_position ASC
+          AND ${this.buildRetentionVisibilityClause('events', 'retention')}
+        ORDER BY events.global_position ASC
         LIMIT 100
       `,
       params,
@@ -881,8 +966,12 @@ export class PostgresEventStoreService
   private buildReadFilterClause(
     filter: ReadReq_Options_FilterOptions,
     params: Array<number | string>,
+    eventsAlias: string,
   ): { sql: string } {
-    const { columnSql, expression } = this.resolveReadFilterTarget(filter);
+    const { columnSql, expression } = this.resolveReadFilterTarget(
+      filter,
+      eventsAlias,
+    );
     const prefixes = expression.prefix.filter((prefix) => prefix.length > 0);
 
     if (prefixes.length > 0) {
@@ -908,20 +997,23 @@ export class PostgresEventStoreService
     );
   }
 
-  private resolveReadFilterTarget(filter: ReadReq_Options_FilterOptions): {
+  private resolveReadFilterTarget(
+    filter: ReadReq_Options_FilterOptions,
+    eventsAlias: string,
+  ): {
     columnSql: string;
     expression: ReadReq_Options_FilterOptions_Expression;
   } {
     if (filter.streamIdentifier) {
       return {
-        columnSql: 'stream_name',
+        columnSql: `${eventsAlias}.stream_name`,
         expression: filter.streamIdentifier,
       };
     }
 
     if (filter.eventType) {
       return {
-        columnSql: "metadata ->> 'type'",
+        columnSql: `${eventsAlias}.metadata ->> 'type'`,
         expression: filter.eventType,
       };
     }
@@ -1066,6 +1158,138 @@ export class PostgresEventStoreService
     if (await this.isStreamTombstoned(streamName)) {
       throw new StreamDeletedServiceError(streamName);
     }
+  }
+
+  private async upsertStreamCurrentRevision(
+    client: PoolClient,
+    streamName: string,
+    currentRevision: number,
+  ): Promise<void> {
+    await client.query(
+      `
+        INSERT INTO stream_retention_policies (stream_name, current_revision)
+        VALUES ($1, $2)
+        ON CONFLICT (stream_name)
+        DO UPDATE SET current_revision = EXCLUDED.current_revision
+      `,
+      [streamName, currentRevision],
+    );
+  }
+
+  private async upsertStreamRetentionPolicy(
+    client: PoolClient,
+    streamName: string,
+    policy: Omit<StreamRetentionPolicy, 'currentRevision'>,
+  ): Promise<void> {
+    await client.query(
+      `
+        INSERT INTO stream_retention_policies (
+          stream_name,
+          current_revision,
+          max_age,
+          max_count,
+          truncate_before
+        )
+        VALUES ($1, NULL, $2, $3, $4)
+        ON CONFLICT (stream_name)
+        DO UPDATE SET
+          max_age = EXCLUDED.max_age,
+          max_count = EXCLUDED.max_count,
+          truncate_before = EXCLUDED.truncate_before
+      `,
+      [streamName, policy.maxAge, policy.maxCount, policy.truncateBefore],
+    );
+  }
+
+  private parseMetadataPolicyUpdate(
+    streamName: string,
+    proposedMessages: AppendReq_ProposedMessage[],
+  ): {
+    streamName: string;
+    policy: Omit<StreamRetentionPolicy, 'currentRevision'>;
+  } | null {
+    if (!this.isMetastream(streamName)) {
+      return null;
+    }
+
+    let policy: Omit<StreamRetentionPolicy, 'currentRevision'> | null = null;
+    for (const message of proposedMessages) {
+      const metadata = message.metadata ?? {};
+      if (
+        metadata.type !== '$metadata' ||
+        metadata['content-type'] !== 'application/json'
+      ) {
+        continue;
+      }
+
+      const payload = this.parseJsonPayload(message.data);
+      policy = {
+        maxAge: this.readMetadataInteger(payload, '$maxAge'),
+        maxCount: this.readMetadataInteger(payload, '$maxCount'),
+        truncateBefore: this.readMetadataInteger(payload, '$tb'),
+      };
+    }
+
+    if (!policy) {
+      return null;
+    }
+
+    return {
+      streamName: streamName.slice(2),
+      policy,
+    };
+  }
+
+  private parseJsonPayload(
+    data: Uint8Array | Buffer | undefined,
+  ): Record<string, unknown> {
+    if (!data || data.length === 0) {
+      return {};
+    }
+
+    const parsed: unknown = JSON.parse(Buffer.from(data).toString('utf8'));
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error('Stream metadata payload must be a JSON object.');
+    }
+
+    return parsed as Record<string, unknown>;
+  }
+
+  private readMetadataInteger(
+    payload: Record<string, unknown>,
+    key: string,
+  ): number | null {
+    const value = payload[key];
+    if (value === undefined || value === null) {
+      return null;
+    }
+
+    if (!Number.isInteger(value)) {
+      throw new Error(`Stream metadata field "${key}" must be an integer.`);
+    }
+
+    return value as number;
+  }
+
+  private buildRetentionVisibilityClause(
+    eventsAlias: string,
+    retentionAlias: string,
+  ): string {
+    return `(
+      (${retentionAlias}.max_age IS NULL OR ${eventsAlias}.created_at >= NOW() - (${retentionAlias}.max_age * INTERVAL '1 second'))
+      AND
+      (${retentionAlias}.truncate_before IS NULL OR ${eventsAlias}.stream_revision >= ${retentionAlias}.truncate_before)
+      AND
+      (
+        ${retentionAlias}.max_count IS NULL
+        OR ${retentionAlias}.current_revision IS NULL
+        OR ${eventsAlias}.stream_revision > ${retentionAlias}.current_revision - ${retentionAlias}.max_count
+      )
+    )`;
   }
 
   private async isStreamTombstoned(
@@ -1228,6 +1452,10 @@ export class PostgresEventStoreService
 
   private decodeStreamName(streamName: Uint8Array): string {
     return Buffer.from(streamName).toString('utf8');
+  }
+
+  private isMetastream(streamName: string): boolean {
+    return streamName.startsWith('$$');
   }
 
   private createWrongExpectedVersionError(
