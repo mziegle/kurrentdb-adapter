@@ -4,7 +4,6 @@
 //   protoc               v7.34.0
 // source: status.proto
 
-/* eslint-disable */
 import { Code } from './code';
 import { Any } from './google/protobuf/any';
 

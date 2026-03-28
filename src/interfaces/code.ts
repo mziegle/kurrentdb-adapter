@@ -4,8 +4,6 @@
 //   protoc               v7.34.0
 // source: code.proto
 
-/* eslint-disable */
-
 export const protobufPackage = 'google.rpc';
 
 /**

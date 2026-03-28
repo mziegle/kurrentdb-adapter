@@ -15,12 +15,22 @@ async function bootstrap() {
       options: {
         url: grpcUrl,
         package: [
+          'event_store.client.gossip',
+          'event_store.client.monitoring',
+          'event_store.client.operations',
+          'event_store.client.persistent_subscriptions',
           'event_store.client.streams',
           'event_store.client.server_features',
+          'event_store.client.users',
         ],
         protoPath: [
+          join(protoDir, 'gossip.proto'),
+          join(protoDir, 'monitoring.proto'),
+          join(protoDir, 'operations.proto'),
+          join(protoDir, 'persistent.proto'),
           join(protoDir, 'streams.proto'),
           join(protoDir, 'serverfeatures.proto'),
+          join(protoDir, 'users.proto'),
         ],
         loader: {
           includeDirs: [protoDir],
