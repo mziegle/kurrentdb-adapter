@@ -1,10 +1,12 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { MicroserviceOptions, Transport } from '@nestjs/microservices';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 async function bootstrap() {
   const grpcUrl = process.env.GRPC_URL ?? '0.0.0.0:2113';
+  const protoDir = resolveProtoDir();
 
   const app = await NestFactory.createMicroservice<MicroserviceOptions>(
     AppModule,
@@ -17,11 +19,11 @@ async function bootstrap() {
           'event_store.client.server_features',
         ],
         protoPath: [
-          join(__dirname, 'proto/Grpc/streams.proto'),
-          join(__dirname, 'proto/Grpc/serverfeatures.proto'),
+          join(protoDir, 'streams.proto'),
+          join(protoDir, 'serverfeatures.proto'),
         ],
         loader: {
-          includeDirs: [join(__dirname, 'proto/Grpc')],
+          includeDirs: [protoDir],
         },
       },
     },
@@ -34,3 +36,19 @@ bootstrap().catch((err) => {
   console.error('Error during application bootstrap:', err);
   process.exit(1);
 });
+
+function resolveProtoDir(): string {
+  const candidates = [
+    join(process.cwd(), 'proto/Grpc'),
+    join(__dirname, '../proto/Grpc'),
+    join(__dirname, 'proto/Grpc'),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(join(candidate, 'streams.proto'))) {
+      return candidate;
+    }
+  }
+
+  throw new Error('Could not locate proto/Grpc/streams.proto.');
+}

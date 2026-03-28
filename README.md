@@ -101,10 +101,80 @@ The gRPC listener defaults to `0.0.0.0:2113`. Override it with:
 GRPC_URL=0.0.0.0:2113
 ```
 
+### Start PostgreSQL for local development
+
+This repo includes a local Postgres stack and a real KurrentDB instance in [docker-compose.yml](c:\Users\micha\Repos\kurrentdb-adapter\docker-compose.yml).
+
+Bring the database up with:
+
+```bash
+npm run db:up
+```
+
+Stop it with:
+
+```bash
+npm run db:down
+```
+
+Bring up the local KurrentDB instance on `127.0.0.1:2114` with:
+
+```bash
+npm run kurrentdb:up
+```
+
+Bring up both Postgres and KurrentDB with:
+
+```bash
+npm run dev:up
+```
+
+Stop the whole local environment with:
+
+```bash
+npm run dev:down
+```
+
 ### Start in development
 
 ```bash
 npm run start:dev
+```
+
+If you want one command that starts Postgres and KurrentDB first and then launches the Nest app in watch mode, use:
+
+```bash
+npm run start:dev:env
+```
+
+### Playground
+
+There is also a small `playground/` folder for experimenting against a running adapter.
+
+By default the scripts connect to:
+
+```bash
+kurrentdb://127.0.0.1:2113?tls=false
+```
+
+Override that with:
+
+```bash
+KURRENTDB_CONNECTION_STRING=kurrentdb://127.0.0.1:2113?tls=false
+```
+
+To point a playground script at the local real KurrentDB instance instead of the adapter, use:
+
+```bash
+KURRENTDB_CONNECTION_STRING=kurrentdb://127.0.0.1:2114?tls=false
+```
+
+Available playground scripts:
+
+```bash
+npm run playground:append-read
+npm run playground:filtered-read
+npm run playground:stream-metadata
 ```
 
 ### Build
@@ -136,8 +206,17 @@ npm run generate
 npm run build
 npm run start
 npm run start:dev
+npm run start:dev:env
 npm run start:debug
 npm run start:prod
+npm run db:up
+npm run db:down
+npm run kurrentdb:up
+npm run dev:up
+npm run dev:down
+npm run playground:append-read
+npm run playground:filtered-read
+npm run playground:stream-metadata
 npm run lint
 npm run test
 npm run test:e2e
@@ -188,8 +267,7 @@ npm run test:e2e:contracts -- --runInBand
 
 ## Limitations
 
-- Only stream-scoped reads are supported.
-- `BatchAppend` and filtered reads are not implemented.
+- `BatchAppend` is not implemented.
 - Stream positions are backed by a simple Postgres global sequence, not full KurrentDB semantics.
 - `Append` wrong-expected-version is mapped with an `AppendResp.wrongExpectedVersion` payload because that is what the Kurrent client expects.
 - The default real-KurrentDB contract runner uses an ephemeral container, so restart-persistence is intentionally skipped there.

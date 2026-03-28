@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kurrentdb-adapter-postgres
+    environment:
+      POSTGRES_DB: kurrentdb_adapter
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d kurrentdb_adapter']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  kurrentdb:
+    image: docker.kurrent.io/kurrent-latest/kurrentdb:latest
+    container_name: kurrentdb-adapter-kurrentdb
+    environment:
+      KURRENTDB_INSECURE: 'true'
+      KURRENTDB_ENABLE_ATOM_PUB_OVER_HTTP: 'true'
+    ports:
+      - '2114:2113'
+
+volumes:
+  postgres-data:
