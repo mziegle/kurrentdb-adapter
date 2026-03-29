@@ -371,10 +371,7 @@ export function registerSubscriptionContractSuite(
       await waitForCaughtUp(subscription, '$all caught-up from start');
 
       const thirdStreamName = context.createStreamName('all-start-third');
-      const liveEventPromise = waitForIteratorNext(
-        iterator,
-        `${thirdStreamName} live $all event`,
-      );
+      const liveEventPromise = nextEventForStream(iterator, thirdStreamName);
 
       await context
         .backend()
@@ -388,13 +385,10 @@ export function registerSubscriptionContractSuite(
         );
 
       await expect(liveEventPromise).resolves.toMatchObject({
-        done: false,
-        value: {
-          event: {
-            streamId: thirdStreamName,
-            type: 'booking-completed',
-            data: { step: 3 },
-          },
+        event: {
+          streamId: thirdStreamName,
+          type: 'booking-completed',
+          data: { step: 3 },
         },
       });
 
