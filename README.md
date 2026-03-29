@@ -314,10 +314,11 @@ npm run test:e2e:contracts -- --runInBand
 - Stream positions are backed by a simple Postgres global sequence, not full KurrentDB semantics.
 - `Append` wrong-expected-version is mapped with an `AppendResp.wrongExpectedVersion` payload because that is what the Kurrent client expects.
 - Unsupported read and subscription modes currently include:
-- filtering on named-stream reads; filters are only supported on `$all`
+- filtering on named-stream reads or named-stream subscriptions; filters are only supported on `$all`
 - read requests that are neither a named-stream read nor an `$all` read
 - backwards subscriptions
 - subscription requests that are neither a named-stream subscription nor an `$all` subscription
+- This matches the current real KurrentDB gRPC `Streams.Read` behavior: filtering is available for `$all` reads and `$all` subscriptions, not direct named-stream reads or subscriptions.
 - Restart-persistence parity with real KurrentDB depends on the suite managing the container lifecycle directly; external KurrentDB targets provided through `KURRENTDB_TEST_CONNECTION_STRING` still skip restart assertions.
 - The adapter is still only partially compatible with KurrentDB outside the currently tested contract surface.
 
