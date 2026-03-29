@@ -28,9 +28,7 @@ import { logHotPath } from './debug-log';
 
 @Controller()
 @PersistentSubscriptionsControllerMethods()
-export class PersistentSubscriptionsStubController
-  implements PersistentSubscriptionsController
-{
+export class PersistentSubscriptionsStubController implements PersistentSubscriptionsController {
   create(request: CreateReq): CreateResp {
     void request;
     logHotPath('gRPC PersistentSubscriptions.Create');
