@@ -26,10 +26,16 @@ Implemented:
 
 - `Read`
   Reads persisted events for a single stream from PostgreSQL, including forward and backward reads, revision-based reads, and `maxCount` limits.
+- `ReadAll`
+  Reads the global event stream in both directions, supports position-based reads, `maxCount`, and stream-name prefix filters.
 - `Append`
   Persists appended events transactionally in PostgreSQL and returns the resulting revision/position.
+- `BatchAppend`
+  Accepts chunked appends from the official client and preserves expected-version behavior across batched requests.
 - Stream metadata retention
   Supports metadata-driven visibility rules such as `$maxCount`, `$maxAge`, and `$tb`.
+- Stream and `$all` subscriptions
+  Supports catch-up and live subscriptions, including filtered `$all` subscriptions by stream-name prefix.
 - `Delete`
   Deletes a stream with expected-revision checks.
 - `Tombstone`
@@ -37,11 +43,7 @@ Implemented:
 - `StartScavenge` / `StopScavenge`
   Exposes scavenging operations and physically removes records that are already hidden by retention rules.
 
-Not implemented:
-
-- `BatchAppend`
-
-Unsupported read modes still throw and should be treated as unavailable.
+Some unsupported read and subscription modes still throw and should be treated as unavailable.
 
 ## Retention And Scavenging
 
@@ -280,6 +282,7 @@ The shared contract tests currently cover:
 - stale expected revision rejection on append
 - `NO_STREAM` append behavior
 - `STREAM_EXISTS` append behavior
+- `BatchAppend`
 - empty append behavior on missing and existing streams
 - missing stream reads
 - multi-event append ordering
@@ -287,8 +290,10 @@ The shared contract tests currently cover:
 - reads from a specific revision
 - explicit revision `0` handling
 - `maxCount` slicing
+- `$all` reads in both directions
+- `$all` filtering by stream name prefix
 - stream metadata retention behavior
-- stream subscriptions
+- stream and `$all` subscriptions
 - persistence across app restart on the adapter backend
 - `Delete`
 - `Tombstone`
@@ -306,14 +311,14 @@ npm run test:e2e:contracts -- --runInBand
 
 ## Limitations
 
-- `BatchAppend` is not implemented.
 - Stream positions are backed by a simple Postgres global sequence, not full KurrentDB semantics.
 - `Append` wrong-expected-version is mapped with an `AppendResp.wrongExpectedVersion` payload because that is what the Kurrent client expects.
+- Some read and subscription modes still intentionally return errors rather than attempting partial compatibility.
 - The default real-KurrentDB contract runner uses an ephemeral container, so restart-persistence is intentionally skipped there.
 - The adapter is still only partially compatible with KurrentDB outside the currently tested contract surface.
 
 ## Recommended Next Steps
 
-- implement `BatchAppend`
 - add a persistent-volume KurrentDB runner for restart-persistence parity
+- either implement or explicitly document the remaining unsupported read/subscription modes
 - expand the contract suite as new RPCs are added
