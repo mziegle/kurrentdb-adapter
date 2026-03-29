@@ -20,7 +20,7 @@ export function registerReadAllContractSuite(
         'read-all-forward-second',
       );
 
-      await context
+      const firstAppend = await context
         .backend()
         .getClient()
         .appendToStream(
@@ -30,7 +30,7 @@ export function registerReadAllContractSuite(
             data: { step: 1 },
           }),
         );
-      await context
+      const secondAppend = await context
         .backend()
         .getClient()
         .appendToStream(
@@ -41,7 +41,14 @@ export function registerReadAllContractSuite(
           }),
         );
 
-      const events = await context.readAllEvents(FORWARDS, START, 500);
+      expect(firstAppend.position).toBeDefined();
+      expect(secondAppend.position).toBeDefined();
+
+      const events = await context.readAllEvents(
+        FORWARDS,
+        expectPosition(firstAppend.position),
+        10,
+      );
       const firstIndex = events.findIndex(
         (event) =>
           event.streamId === firstStreamName &&
@@ -119,7 +126,7 @@ export function registerReadAllContractSuite(
             data: { step: 1 },
           }),
         );
-      await context
+      const secondAppend = await context
         .backend()
         .getClient()
         .appendToStream(
@@ -129,7 +136,7 @@ export function registerReadAllContractSuite(
             data: { step: 2 },
           }),
         );
-      await context
+      const thirdAppend = await context
         .backend()
         .getClient()
         .appendToStream(
@@ -140,22 +147,16 @@ export function registerReadAllContractSuite(
           }),
         );
 
-      const allEvents = await context.readAllEvents(FORWARDS, START, 500);
-      const secondEvent = allEvents.find(
-        (event) =>
-          event.streamId === secondStreamName &&
-          event.type === 'booking-confirmed',
-      );
-
-      expect(secondEvent?.position).toBeDefined();
+      const secondPosition = expectPosition(secondAppend.position);
+      expectPosition(thirdAppend.position);
 
       const slicedEvents = await context.readAllEvents(
         FORWARDS,
         {
-          commit: secondEvent!.position!.commit,
-          prepare: secondEvent!.position!.prepare,
+          commit: secondPosition.commit,
+          prepare: secondPosition.prepare,
         },
-        500,
+        10,
       );
 
       expect(slicedEvents).toMatchObject([
@@ -308,4 +309,12 @@ async function readAllMatchingEvents(
   }
 
   return received;
+}
+
+function expectPosition(
+  position: { commit: bigint; prepare: bigint } | undefined,
+): { commit: bigint; prepare: bigint } {
+  expect(position).toBeDefined();
+
+  return position!;
 }

@@ -151,37 +151,51 @@ export class StreamsController {
     logHotPath('gRPC Streams.BatchAppend', {
       detail: summarizeGrpcMetadata(call.metadata),
     });
-    let pendingMessages: BatchAppendReq[] = [];
-    let chain = Promise.resolve();
+    const pendingMessages = new Map<string, BatchAppendReq[]>();
+    let activeWrites = 0;
     let streamEnded = false;
+    let streamClosed = false;
 
     call.on('data', (message: BatchAppendReq) => {
-      pendingMessages.push(message);
+      const correlationKey = this.getBatchAppendCorrelationKey(
+        message.correlationId,
+      );
+      const requestGroup = pendingMessages.get(correlationKey) ?? [];
+      requestGroup.push(message);
+      pendingMessages.set(correlationKey, requestGroup);
 
       if (!message.isFinal) {
         return;
       }
 
-      const requestGroup = pendingMessages;
-      pendingMessages = [];
+      pendingMessages.delete(correlationKey);
+      activeWrites += 1;
 
-      chain = chain
-        .then(async () => {
-          const response = await this.eventStore.batchAppend(requestGroup);
-          call.write(response);
-        })
-        .catch((error: unknown) => {
-          call.destroy(this.mapServiceError(error));
-        });
+      void this.handleBatchAppendGroup(call, requestGroup).finally(() => {
+        activeWrites -= 1;
+        this.finishBatchAppendStream(
+          call,
+          streamEnded,
+          activeWrites,
+          () => {
+            streamClosed = true;
+          },
+          streamClosed,
+        );
+      });
     });
 
     call.on('end', () => {
       streamEnded = true;
-      void chain.finally(() => {
-        if (!call.destroyed) {
-          call.end();
-        }
-      });
+      this.finishBatchAppendStream(
+        call,
+        streamEnded,
+        activeWrites,
+        () => {
+          streamClosed = true;
+        },
+        streamClosed,
+      );
     });
 
     call.on('error', (error) => {
@@ -189,6 +203,69 @@ export class StreamsController {
         call.destroy(error);
       }
     });
+  }
+
+  private async handleBatchAppendGroup(
+    call: ServerDuplexStream<BatchAppendReq, BatchAppendResp>,
+    requestGroup: BatchAppendReq[],
+  ): Promise<void> {
+    try {
+      const response = await this.eventStore.batchAppend(requestGroup);
+      if (call.destroyed) {
+        return;
+      }
+
+      await this.writeBatchAppendResponse(call, response);
+    } catch (error: unknown) {
+      if (!call.destroyed) {
+        call.destroy(this.mapServiceError(error));
+      }
+    }
+  }
+
+  private finishBatchAppendStream(
+    call: ServerDuplexStream<BatchAppendReq, BatchAppendResp>,
+    streamEnded: boolean,
+    activeWrites: number,
+    markClosed: () => void,
+    streamClosed: boolean,
+  ): void {
+    if (!streamEnded || activeWrites > 0 || call.destroyed || streamClosed) {
+      return;
+    }
+
+    markClosed();
+    call.end();
+  }
+
+  private writeBatchAppendResponse(
+    call: ServerDuplexStream<BatchAppendReq, BatchAppendResp>,
+    response: BatchAppendResp,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      call.write(response, (error) => {
+        if (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+
+        resolve();
+      });
+    });
+  }
+
+  private getBatchAppendCorrelationKey(
+    correlationId: BatchAppendReq['correlationId'],
+  ): string {
+    if (correlationId?.string) {
+      return correlationId.string;
+    }
+
+    if (correlationId?.structured) {
+      return `${correlationId.structured.mostSignificantBits}:${correlationId.structured.leastSignificantBits}`;
+    }
+
+    throw new Error('Batch append request must include a correlation id.');
   }
 
   private mapServiceError(error: unknown): Error {

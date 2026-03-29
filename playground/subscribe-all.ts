@@ -9,7 +9,6 @@ async function main(): Promise<void> {
     subscription.on('data', (event) => {
       console.log('Received event:', event);
     });
-
   } finally {
     await client.dispose();
   }
