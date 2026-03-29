@@ -197,11 +197,26 @@ export class PostgresEventStoreService
   }
 
   async append(messages: AppendReq[]): Promise<AppendResp> {
-    const options = messages.find((message) => message.options)?.options;
-    const proposedMessages = messages
-      .map((message) => message.proposedMessage)
-      .filter((message) => message !== undefined);
+    let options: AppendReq['options'] | undefined;
+    const proposedMessages: AppendReq_ProposedMessage[] = [];
 
+    for (const message of messages) {
+      if (message.options && !options) {
+        options = message.options;
+      }
+
+      if (message.proposedMessage) {
+        proposedMessages.push(message.proposedMessage);
+      }
+    }
+
+    return this.appendPrepared(options, proposedMessages);
+  }
+
+  private async appendPrepared(
+    options: AppendReq['options'],
+    proposedMessages: AppendReq_ProposedMessage[],
+  ): Promise<AppendResp> {
     if (!options) {
       throw new Error('Append request must include options.');
     }
@@ -244,8 +259,27 @@ export class PostgresEventStoreService
       let nextRevision = streamState.currentRevision ?? -1;
       let lastPosition = currentRevision === null ? null : 0;
 
-      for (const proposedMessage of proposedMessages) {
-        nextRevision += 1;
+      if (proposedMessages.length > 0) {
+        const insertValues: Array<string | number | Buffer> = [];
+        const rowPlaceholders: string[] = [];
+
+        for (const proposedMessage of proposedMessages) {
+          nextRevision += 1;
+
+          const parameterOffset = insertValues.length;
+          rowPlaceholders.push(
+            `($${parameterOffset + 1}, $${parameterOffset + 2}, $${parameterOffset + 3}, $${parameterOffset + 4}::uuid, $${parameterOffset + 5}::jsonb, $${parameterOffset + 6}, $${parameterOffset + 7})`,
+          );
+          insertValues.push(
+            streamName,
+            targetGeneration,
+            nextRevision,
+            this.getEventId(proposedMessage.id),
+            JSON.stringify(proposedMessage.metadata ?? {}),
+            Buffer.from(proposedMessage.customMetadata ?? new Uint8Array()),
+            Buffer.from(proposedMessage.data ?? new Uint8Array()),
+          );
+        }
 
         const result = await client.query<{ global_position: string | number }>(
           `
@@ -258,21 +292,15 @@ export class PostgresEventStoreService
               custom_metadata,
               data
             )
-            VALUES ($1, $2, $3, $4::uuid, $5::jsonb, $6, $7)
+            VALUES ${rowPlaceholders.join(', ')}
             RETURNING global_position
           `,
-          [
-            streamName,
-            targetGeneration,
-            nextRevision,
-            this.getEventId(proposedMessage.id),
-            JSON.stringify(proposedMessage.metadata ?? {}),
-            Buffer.from(proposedMessage.customMetadata ?? new Uint8Array()),
-            Buffer.from(proposedMessage.data ?? new Uint8Array()),
-          ],
+          insertValues,
         );
 
-        lastPosition = this.toNumber(result.rows[0].global_position);
+        lastPosition = this.toNumber(
+          result.rows[result.rows.length - 1].global_position,
+        );
       }
 
       if (proposedMessages.length > 0 && !this.isMetastream(streamName)) {
@@ -340,27 +368,28 @@ export class PostgresEventStoreService
       throw new Error('Batch append request must include stream options.');
     }
 
-    const appendMessages: AppendReq[] = [
-      {
-        options: {
-          streamIdentifier: options.streamIdentifier,
-          revision: options.streamPosition,
-          noStream: options.noStream ? {} : undefined,
-          any: options.any ? {} : undefined,
-          streamExists: options.streamExists ? {} : undefined,
-        },
-      },
-      ...requests.flatMap((request) =>
-        (request.proposedMessages ?? []).map((message) => ({
-          proposedMessage: this.mapBatchProposedMessage(message),
-        })),
-      ),
-    ];
+    const appendOptions: AppendReq['options'] = {
+      streamIdentifier: options.streamIdentifier,
+      revision: options.streamPosition,
+      noStream: options.noStream ? {} : undefined,
+      any: options.any ? {} : undefined,
+      streamExists: options.streamExists ? {} : undefined,
+    };
+    const proposedMessages: AppendReq_ProposedMessage[] = [];
+
+    for (const request of requests) {
+      for (const message of request.proposedMessages ?? []) {
+        proposedMessages.push(message);
+      }
+    }
 
     let appendResponse: AppendResp;
 
     try {
-      appendResponse = await this.append(appendMessages);
+      appendResponse = await this.appendPrepared(
+        appendOptions,
+        proposedMessages,
+      );
     } catch (error) {
       if (error instanceof StreamDeletedServiceError) {
         return {
@@ -1943,17 +1972,6 @@ export class PostgresEventStoreService
     }
 
     return id.string;
-  }
-
-  private mapBatchProposedMessage(
-    message: BatchAppendReq['proposedMessages'][number],
-  ): AppendReq_ProposedMessage {
-    return {
-      id: message.id,
-      metadata: message.metadata,
-      customMetadata: message.customMetadata,
-      data: message.data,
-    };
   }
 
   private createBatchAppendWrongExpectedVersionStatus(

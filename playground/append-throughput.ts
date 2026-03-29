@@ -1,5 +1,5 @@
 import { hrtime } from 'node:process';
-import { jsonEvent } from '@kurrent/kurrentdb-client';
+import { jsonEvent, KurrentDBClient } from '@kurrent/kurrentdb-client';
 import { createPlaygroundClient } from './client';
 
 export type BenchmarkConfig = {
@@ -108,37 +108,33 @@ async function runWarmup(
 }
 
 async function runWorker(
+  client: KurrentDBClient,
   streams: string[],
   config: BenchmarkConfig,
   payload: string,
 ): Promise<WorkerResult> {
-  const client = createPlaygroundClient(config.connectionString);
   const startedAt = hrtime.bigint();
 
-  try {
-    for (const streamName of streams) {
-      for (
-        let appendIndex = 0;
-        appendIndex < config.appendsPerStream;
-        appendIndex += 1
-      ) {
-        await client.appendToStream(
-          streamName,
-          Array.from({ length: config.eventsPerAppend }, (_, eventIndex) =>
-            jsonEvent({
-              type: 'bench-append',
-              data: {
-                appendIndex,
-                eventIndex,
-                payload,
-              },
-            }),
-          ),
-        );
-      }
+  for (const streamName of streams) {
+    for (
+      let appendIndex = 0;
+      appendIndex < config.appendsPerStream;
+      appendIndex += 1
+    ) {
+      await client.appendToStream(
+        streamName,
+        Array.from({ length: config.eventsPerAppend }, (_, eventIndex) =>
+          jsonEvent({
+            type: 'bench-append',
+            data: {
+              appendIndex,
+              eventIndex,
+              payload,
+            },
+          }),
+        ),
+      );
     }
-  } finally {
-    await client.dispose();
   }
 
   const elapsedMs = Number(hrtime.bigint() - startedAt) / 1_000_000;
@@ -180,11 +176,23 @@ export async function runAppendBenchmark(
 
   await runWarmup(config, payload);
 
-  const startedAt = hrtime.bigint();
-  const workerResults = await Promise.all(
-    streamChunks.map((streams) => runWorker(streams, config, payload)),
+  const clients = streamChunks.map(() =>
+    createPlaygroundClient(config.connectionString),
   );
-  const totalElapsedMs = Number(hrtime.bigint() - startedAt) / 1_000_000;
+  let workerResults: WorkerResult[];
+  let totalElapsedMs: number;
+
+  try {
+    const startedAt = hrtime.bigint();
+    workerResults = await Promise.all(
+      streamChunks.map((streams, index) =>
+        runWorker(clients[index], streams, config, payload),
+      ),
+    );
+    totalElapsedMs = Number(hrtime.bigint() - startedAt) / 1_000_000;
+  } finally {
+    await Promise.all(clients.map((client) => client.dispose()));
+  }
 
   const totalAppends = workerResults.reduce(
     (sum, result) => sum + result.appendCount,

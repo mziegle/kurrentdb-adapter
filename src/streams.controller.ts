@@ -155,6 +155,7 @@ export class StreamsController {
     let activeWrites = 0;
     let streamEnded = false;
     let streamClosed = false;
+    let responseChain = Promise.resolve();
 
     call.on('data', (message: BatchAppendReq) => {
       const correlationKey = this.getBatchAppendCorrelationKey(
@@ -171,7 +172,23 @@ export class StreamsController {
       pendingMessages.delete(correlationKey);
       activeWrites += 1;
 
-      void this.handleBatchAppendGroup(call, requestGroup).finally(() => {
+      void this.handleBatchAppendGroup(call, requestGroup, (response) => {
+        responseChain = responseChain
+          .then(async () => {
+            if (call.destroyed) {
+              return;
+            }
+
+            await this.writeBatchAppendResponse(call, response);
+          })
+          .catch((error: unknown) => {
+            if (!call.destroyed) {
+              call.destroy(this.mapServiceError(error));
+            }
+          });
+
+        return responseChain;
+      }).finally(() => {
         activeWrites -= 1;
         this.finishBatchAppendStream(
           call,
@@ -208,6 +225,7 @@ export class StreamsController {
   private async handleBatchAppendGroup(
     call: ServerDuplexStream<BatchAppendReq, BatchAppendResp>,
     requestGroup: BatchAppendReq[],
+    enqueueResponse: (response: BatchAppendResp) => Promise<void>,
   ): Promise<void> {
     try {
       const response = await this.eventStore.batchAppend(requestGroup);
@@ -215,7 +233,7 @@ export class StreamsController {
         return;
       }
 
-      await this.writeBatchAppendResponse(call, response);
+      await enqueueResponse(response);
     } catch (error: unknown) {
       if (!call.destroyed) {
         call.destroy(this.mapServiceError(error));
