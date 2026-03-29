@@ -41,9 +41,14 @@ export async function setupKurrentDbBackend(): Promise<ScavengeCapableBackend> {
   if (configuredConnectionString) {
     const client = createClient(configuredConnectionString);
     const operationsClient = createOperationsClient(configuredConnectionString);
+    const parsed = new URL(
+      configuredConnectionString.replace(/^kurrentdb:/, 'http:'),
+    );
 
     return {
       getClient: () => client,
+      getGrpcAddress: () =>
+        `${parsed.hostname}:${parsed.port || DEFAULT_KURRENTDB_GRPC_PORT}`,
       supportsRestart: false,
       restart: () =>
         Promise.reject(
@@ -99,6 +104,10 @@ export async function setupKurrentDbBackend(): Promise<ScavengeCapableBackend> {
 
   return {
     getClient: () => client,
+    getGrpcAddress: () =>
+      `${container.getHost()}:${container.getMappedPort(
+        DEFAULT_KURRENTDB_GRPC_PORT,
+      )}`,
     supportsRestart: true,
     restart: async () => {
       await client.dispose();

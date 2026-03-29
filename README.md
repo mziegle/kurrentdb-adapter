@@ -43,7 +43,7 @@ Implemented:
 - `StartScavenge` / `StopScavenge`
   Exposes scavenging operations and physically removes records that are already hidden by retention rules.
 
-Some unsupported read and subscription modes still throw and should be treated as unavailable.
+Unsupported read and subscription modes are documented below and should be treated as unavailable.
 
 ## Retention And Scavenging
 
@@ -313,7 +313,11 @@ npm run test:e2e:contracts -- --runInBand
 
 - Stream positions are backed by a simple Postgres global sequence, not full KurrentDB semantics.
 - `Append` wrong-expected-version is mapped with an `AppendResp.wrongExpectedVersion` payload because that is what the Kurrent client expects.
-- Some read and subscription modes still intentionally return errors rather than attempting partial compatibility.
+- Unsupported read and subscription modes currently include:
+- filtering on named-stream reads; filters are only supported on `$all`
+- read requests that are neither a named-stream read nor an `$all` read
+- backwards subscriptions
+- subscription requests that are neither a named-stream subscription nor an `$all` subscription
 - Restart-persistence parity with real KurrentDB depends on the suite managing the container lifecycle directly; external KurrentDB targets provided through `KURRENTDB_TEST_CONNECTION_STRING` still skip restart assertions.
 - The adapter is still only partially compatible with KurrentDB outside the currently tested contract surface.
 

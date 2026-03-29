@@ -107,6 +107,8 @@ export class StreamDeletedServiceError extends Error {
   }
 }
 
+export class InvalidArgumentServiceError extends Error {}
+
 @Injectable()
 export class PostgresEventStoreService
   implements OnModuleInit, OnModuleDestroy
@@ -422,11 +424,16 @@ export class PostgresEventStoreService
       throw new Error('Read request must include options.');
     }
 
-    if (options.stream?.streamIdentifier?.streamName) {
-      if (options.filter) {
-        throw new Error('Filtered reads are only supported on $all.');
-      }
+    const streamOptionCase = this.getReadStreamOptionCase(options);
+    if (streamOptionCase === 'None') {
+      throw new InvalidArgumentServiceError(
+        "'None' is not a valid EventStore.Client.Streams.ReadReq+Types+Options+StreamOptionOneofCase",
+      );
+    }
 
+    this.assertSupportedReadCombination(options, streamOptionCase);
+
+    if (options.stream?.streamIdentifier?.streamName) {
       const streamName = this.decodeStreamName(
         options.stream.streamIdentifier.streamName,
       );
@@ -454,9 +461,14 @@ export class PostgresEventStoreService
       throw new Error('Subscription reads must include subscription options.');
     }
 
-    if (this.isBackwardsRead(options.readDirection)) {
-      throw new Error('Backwards subscriptions are not supported.');
+    const streamOptionCase = this.getReadStreamOptionCase(options);
+    if (streamOptionCase === 'None') {
+      throw new InvalidArgumentServiceError(
+        "'None' is not a valid EventStore.Client.Streams.ReadReq+Types+Options+StreamOptionOneofCase",
+      );
     }
+
+    this.assertSupportedReadCombination(options, streamOptionCase);
 
     yield {
       confirmation: {
@@ -465,10 +477,6 @@ export class PostgresEventStoreService
     };
 
     if (options.stream?.streamIdentifier?.streamName) {
-      if (options.filter) {
-        throw new Error('Filtered reads are only supported on $all.');
-      }
-
       const streamName = this.decodeStreamName(
         options.stream.streamIdentifier.streamName,
       );
@@ -554,6 +562,72 @@ export class PostgresEventStoreService
         isCancelled,
       );
     }
+  }
+
+  private getReadStreamOptionCase(
+    options: NonNullable<ReadReq['options']>,
+  ): 'Stream' | 'All' | 'None' {
+    if (options.stream?.streamIdentifier?.streamName) {
+      return 'Stream';
+    }
+
+    if (options.all) {
+      return 'All';
+    }
+
+    return 'None';
+  }
+
+  private getReadCountOptionCase(
+    options: NonNullable<ReadReq['options']>,
+  ): 'Count' | 'Subscription' | 'None' {
+    if (options.subscription) {
+      return 'Subscription';
+    }
+
+    if (options.count !== undefined) {
+      return 'Count';
+    }
+
+    return 'None';
+  }
+
+  private getReadFilterOptionCase(
+    options: NonNullable<ReadReq['options']>,
+  ): 'Filter' | 'NoFilter' {
+    return options.filter ? 'Filter' : 'NoFilter';
+  }
+
+  private assertSupportedReadCombination(
+    options: NonNullable<ReadReq['options']>,
+    streamOptionCase: 'Stream' | 'All',
+  ): void {
+    const countOptionCase = this.getReadCountOptionCase(options);
+    const readDirection = this.isBackwardsRead(options.readDirection)
+      ? 'Backwards'
+      : 'Forwards';
+    const filterOptionCase = this.getReadFilterOptionCase(options);
+
+    const isSupported =
+      (streamOptionCase === 'Stream' &&
+        countOptionCase === 'Count' &&
+        filterOptionCase === 'NoFilter') ||
+      (streamOptionCase === 'All' && countOptionCase === 'Count') ||
+      (streamOptionCase === 'Stream' &&
+        countOptionCase === 'Subscription' &&
+        readDirection === 'Forwards' &&
+        filterOptionCase === 'NoFilter') ||
+      (streamOptionCase === 'All' &&
+        countOptionCase === 'Subscription' &&
+        readDirection === 'Forwards');
+
+    if (isSupported) {
+      return;
+    }
+
+    throw new InvalidArgumentServiceError(
+      `The combination of (${streamOptionCase}, ${countOptionCase}, ${readDirection}, ${filterOptionCase}) is invalid.`,
+    );
   }
 
   private async *subscribeToAll(

@@ -14,6 +14,7 @@ type ReadAllPosition = {
 
 export type StreamsContractBackend = {
   getClient(): KurrentDBClient;
+  getGrpcAddress(): string;
   restart(): Promise<void>;
   dispose(): Promise<void>;
   supportsRestart: boolean;

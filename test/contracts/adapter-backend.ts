@@ -77,6 +77,7 @@ export async function setupAdapterBackend(): Promise<AdapterBackend> {
 
   return {
     getClient: () => client,
+    getGrpcAddress: () => `127.0.0.1:${grpcPort}`,
     supportsRestart: true,
     restart: async () => {
       await client.dispose();

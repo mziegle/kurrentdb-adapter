@@ -18,6 +18,7 @@ import {
 } from './interfaces/streams';
 import { Observable } from 'rxjs';
 import {
+  InvalidArgumentServiceError,
   PostgresEventStoreService,
   StreamDeletedServiceError,
 } from './postgres-event-store.service';
@@ -205,6 +206,14 @@ export class StreamsController {
           metadata,
         },
       );
+    }
+
+    if (error instanceof InvalidArgumentServiceError) {
+      return Object.assign(new Error(error.message), {
+        name: 'InvalidArgumentError',
+        code: status.INVALID_ARGUMENT,
+        details: error.message,
+      });
     }
 
     return error as Error;
