@@ -26,6 +26,14 @@
 - Read-missing-stream behavior is implemented by returning `streamNotFound` in the read response stream.
 - The Kurrent client converts that into `StreamNotFoundError`.
 
+- Scavenging behavior is subtle and should follow the verified KurrentDB notes in
+  [docs/scavenging.md](c:/Users/micha/Repos/kurrentdb-adapter/docs/scavenging.md).
+- In particular, `$tb`, `$maxCount`, and `$maxAge` hide events from stream reads
+  before scavenging, but KurrentDB keeps those records in storage and in `$all`
+  until a scavenge runs.
+- KurrentDB also keeps the last event in a stream rather than scavenging a
+  stream to emptiness purely because of truncation metadata.
+
 ## Testing lessons
 
 - Run e2e tests with Docker/Testcontainers available.

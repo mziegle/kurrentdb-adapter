@@ -5,6 +5,9 @@ contract and persists stream events in PostgreSQL.
 
 It is still a partial adapter, not a full KurrentDB-compatible implementation.
 
+Retention and scavenging behavior are documented in
+[docs/scavenging.md](c:\Users\micha\Repos\kurrentdb-adapter\docs\scavenging.md).
+
 ## What It Does
 
 - Boots a NestJS microservice over gRPC
@@ -13,6 +16,8 @@ It is still a partial adapter, not a full KurrentDB-compatible implementation.
 - Generates TypeScript interfaces from protobuf files with `ts-proto`
 - Stores appended events in PostgreSQL
 - Reads persisted stream events back over gRPC
+- Applies stream metadata retention rules such as `$maxCount`, `$maxAge`, and `$tb`
+- Supports scavenging of retention-hidden records
 - Exposes a partial implementation of the `Streams` service
 
 ## Current Status
@@ -23,17 +28,36 @@ Implemented:
   Reads persisted events for a single stream from PostgreSQL, including forward and backward reads, revision-based reads, and `maxCount` limits.
 - `Append`
   Persists appended events transactionally in PostgreSQL and returns the resulting revision/position.
+- Stream metadata retention
+  Supports metadata-driven visibility rules such as `$maxCount`, `$maxAge`, and `$tb`.
 - `Delete`
   Deletes a stream with expected-revision checks.
 - `Tombstone`
   Permanently tombstones a stream and prevents future appends, reads, and deletes.
+- `StartScavenge` / `StopScavenge`
+  Exposes scavenging operations and physically removes records that are already hidden by retention rules.
 
 Not implemented:
 
 - `BatchAppend`
-- Filtered reads
 
 Unsupported read modes still throw and should be treated as unavailable.
+
+## Retention And Scavenging
+
+The adapter now follows the same broad retention model that KurrentDB uses:
+
+- `$tb`, `$maxCount`, and `$maxAge` affect stream reads immediately
+- those hidden events are still present in storage before scavenging
+- before scavenging they may still be visible through `$all`
+- scavenging is the step that physically removes those records
+
+One important compatibility detail is that KurrentDB does not scavenge away the
+last event in a stream purely because of truncation metadata. The adapter keeps
+that rule as well.
+
+For the full notes and source references, see
+[docs/scavenging.md](c:\Users\micha\Repos\kurrentdb-adapter\docs\scavenging.md).
 
 ## Stack
 
@@ -244,6 +268,8 @@ The adapter exposes the `Streams` gRPC service:
 - `Tombstone(TombstoneReq) returns (TombstoneResp)`
 - `BatchAppend(stream BatchAppendReq) returns (stream BatchAppendResp)`
 
+It also exposes a partial `Operations` service including scavenging endpoints.
+
 ## Testing
 
 Contract coverage lives in `test/contracts/streams-contract-suite.ts` and is exercised by backend-specific runners. The adapter runner in `test/streams.e2e-spec.ts` starts PostgreSQL with Testcontainers and boots the Nest gRPC service. The KurrentDB runner in `test/kurrentdb.e2e-spec.ts` runs the same client-level assertions against a real KurrentDB target.
@@ -261,10 +287,12 @@ The shared contract tests currently cover:
 - reads from a specific revision
 - explicit revision `0` handling
 - `maxCount` slicing
+- stream metadata retention behavior
 - stream subscriptions
 - persistence across app restart on the adapter backend
 - `Delete`
 - `Tombstone`
+- scavenging behavior against both the adapter and real KurrentDB
 
 Run them with:
 
@@ -282,6 +310,7 @@ npm run test:e2e:contracts -- --runInBand
 - Stream positions are backed by a simple Postgres global sequence, not full KurrentDB semantics.
 - `Append` wrong-expected-version is mapped with an `AppendResp.wrongExpectedVersion` payload because that is what the Kurrent client expects.
 - The default real-KurrentDB contract runner uses an ephemeral container, so restart-persistence is intentionally skipped there.
+- The adapter is still only partially compatible with KurrentDB outside the currently tested contract surface.
 
 ## Recommended Next Steps
 
