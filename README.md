@@ -294,7 +294,7 @@ The shared contract tests currently cover:
 - `$all` filtering by stream name prefix
 - stream metadata retention behavior
 - stream and `$all` subscriptions
-- persistence across app restart on the adapter backend
+- persistence across app restart on both the adapter backend and the default managed KurrentDB backend
 - `Delete`
 - `Tombstone`
 - scavenging behavior against both the adapter and real KurrentDB
@@ -307,18 +307,17 @@ npm run test:e2e:kurrentdb -- --runInBand
 npm run test:e2e:contracts -- --runInBand
 ```
 
-`test:e2e:kurrentdb` uses `KURRENTDB_TEST_CONNECTION_STRING` when provided. Otherwise it tries to start `docker.kurrent.io/kurrent-latest/kurrentdb:latest` in Testcontainers. The default KurrentDB runner currently skips restart-persistence assertions because it uses an ephemeral container.
+`test:e2e:kurrentdb` uses `KURRENTDB_TEST_CONNECTION_STRING` when provided. Otherwise it starts `docker.kurrent.io/kurrent-latest/kurrentdb:latest` in Testcontainers and includes restart-persistence assertions against that managed container. When `KURRENTDB_TEST_CONNECTION_STRING` points to an external instance, restart assertions are skipped because the suite does not control that process lifecycle.
 
 ## Limitations
 
 - Stream positions are backed by a simple Postgres global sequence, not full KurrentDB semantics.
 - `Append` wrong-expected-version is mapped with an `AppendResp.wrongExpectedVersion` payload because that is what the Kurrent client expects.
 - Some read and subscription modes still intentionally return errors rather than attempting partial compatibility.
-- The default real-KurrentDB contract runner uses an ephemeral container, so restart-persistence is intentionally skipped there.
+- Restart-persistence parity with real KurrentDB depends on the suite managing the container lifecycle directly; external KurrentDB targets provided through `KURRENTDB_TEST_CONNECTION_STRING` still skip restart assertions.
 - The adapter is still only partially compatible with KurrentDB outside the currently tested contract surface.
 
 ## Recommended Next Steps
 
-- add a persistent-volume KurrentDB runner for restart-persistence parity
 - either implement or explicitly document the remaining unsupported read/subscription modes
 - expand the contract suite as new RPCs are added
