@@ -20,6 +20,7 @@
     "dev:up": "docker compose up -d postgres kurrentdb",
     "dev:down": "docker compose down",
     "playground:append-read": "ts-node playground/append-and-read.ts",
+    "playground:subscribe-all": "ts-node playground/subscribe-all.ts",
     "playground:filtered-read": "ts-node playground/filtered-read.ts",
     "playground:stream-metadata": "ts-node playground/stream-metadata.ts",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
