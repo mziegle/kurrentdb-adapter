@@ -22,6 +22,14 @@ function createClient(connectionString: string): KurrentDBClient {
   );
 }
 
+function createContainerConnectionString(
+  container: StartedTestContainer,
+): string {
+  return `kurrentdb://${container.getHost()}:${container.getMappedPort(
+    DEFAULT_KURRENTDB_GRPC_PORT,
+  )}?tls=false`;
+}
+
 async function waitForWarmup(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 2_000));
 }
@@ -77,13 +85,12 @@ export async function setupKurrentDbBackend(): Promise<ScavengeCapableBackend> {
       .withWaitStrategy(Wait.forListeningPorts())
       .start();
 
-    const port = container.getMappedPort(DEFAULT_KURRENTDB_GRPC_PORT);
     await waitForWarmup();
-    client = wrapClientTimeouts(
-      KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${port}?tls=false`,
-    );
+    const connectionString = createContainerConnectionString(container);
+    const parsed = new URL(connectionString.replace(/^kurrentdb:/, 'http:'));
+    client = createClient(connectionString);
     operationsClient = new OperationsClient(
-      `127.0.0.1:${port}`,
+      `${parsed.hostname}:${parsed.port || DEFAULT_KURRENTDB_GRPC_PORT}`,
       credentials.createInsecure(),
     );
   }
@@ -92,13 +99,17 @@ export async function setupKurrentDbBackend(): Promise<ScavengeCapableBackend> {
 
   return {
     getClient: () => client,
-    supportsRestart: false,
+    supportsRestart: true,
     restart: async () => {
-      const port = container.getMappedPort(DEFAULT_KURRENTDB_GRPC_PORT);
       await client.dispose();
       await container.restart();
-      client = wrapClientTimeouts(
-        KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${port}?tls=false`,
+      await waitForWarmup();
+      const connectionString = createContainerConnectionString(container);
+      const parsed = new URL(connectionString.replace(/^kurrentdb:/, 'http:'));
+      client = createClient(connectionString);
+      operationsClient = new OperationsClient(
+        `${parsed.hostname}:${parsed.port || DEFAULT_KURRENTDB_GRPC_PORT}`,
+        credentials.createInsecure(),
       );
     },
     dispose: async () => {
