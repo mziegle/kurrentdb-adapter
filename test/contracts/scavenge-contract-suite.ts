@@ -1,6 +1,8 @@
 import {
   FORWARDS,
   START,
+  StreamDeletedError,
+  StreamNotFoundError,
   jsonEvent,
   streamNameFilter,
 } from '@kurrent/kurrentdb-client';
@@ -90,6 +92,119 @@ export function registerScavengeContractSuite(
         success: true,
         nextExpectedRevision: 3n,
       });
+    });
+
+    it('keeps soft-deleted stream history in $all until scavenge and then removes it', async () => {
+      const streamName = `${backendName.toLowerCase()}-delete-scavenge-${Date.now()}`;
+
+      await backend.getClient().appendToStream(streamName, [
+        jsonEvent({
+          type: 'booking-created',
+          data: { step: 1 },
+        }),
+        jsonEvent({
+          type: 'booking-confirmed',
+          data: { step: 2 },
+        }),
+      ]);
+
+      await backend.getClient().deleteStream(streamName);
+
+      await expect(
+        readStreamEvents(backend, streamName),
+      ).rejects.toBeInstanceOf(StreamNotFoundError);
+      await expect(
+        readAllEventsForStream(backend, streamName),
+      ).resolves.toHaveLength(2);
+
+      const scavengeResult = await backend.startScavenge();
+      expect(scavengeResult.scavengeId).not.toHaveLength(0);
+
+      await waitFor(async () => {
+        expect(await readAllEventsForStream(backend, streamName)).toMatchObject(
+          [
+            {
+              type: 'booking-confirmed',
+              data: { step: 2 },
+            },
+          ],
+        );
+      });
+    });
+
+    it('keeps tombstoned stream history in $all until scavenge and then removes it', async () => {
+      const streamName = `${backendName.toLowerCase()}-tombstone-scavenge-${Date.now()}`;
+
+      await backend.getClient().appendToStream(
+        streamName,
+        jsonEvent({
+          type: 'booking-created',
+          data: { step: 1 },
+        }),
+      );
+
+      await backend.getClient().tombstoneStream(streamName);
+
+      await expect(
+        readStreamEvents(backend, streamName),
+      ).rejects.toBeInstanceOf(StreamDeletedError);
+      await expect(
+        readAllEventsForStream(backend, streamName),
+      ).resolves.toMatchObject([
+        {
+          type: 'booking-created',
+          data: { step: 1 },
+        },
+        {
+          type: '$streamDeleted',
+          data: [],
+        },
+      ]);
+
+      const scavengeResult = await backend.startScavenge();
+      expect(scavengeResult.scavengeId).not.toHaveLength(0);
+
+      await waitFor(async () => {
+        expect(await readAllEventsForStream(backend, streamName)).toMatchObject(
+          [
+            {
+              type: '$streamDeleted',
+              data: [],
+            },
+          ],
+        );
+      });
+    });
+
+    it('keeps the last truncated event in storage even after scavenging', async () => {
+      const streamName = `${backendName.toLowerCase()}-truncate-last-${Date.now()}`;
+
+      await backend.getClient().appendToStream(
+        streamName,
+        jsonEvent({
+          type: 'booking-created',
+          data: { step: 1 },
+        }),
+      );
+
+      await backend.getClient().setStreamMetadata(streamName, {
+        truncateBefore: 1,
+      });
+
+      await expect(readStreamEvents(backend, streamName)).resolves.toEqual([]);
+      await expect(
+        readAllEventsForStream(backend, streamName),
+      ).resolves.toHaveLength(1);
+
+      const scavengeResult = await backend.startScavenge();
+      expect(scavengeResult.scavengeId).not.toHaveLength(0);
+
+      await waitFor(async () => {
+        expect(await readAllEventsForStream(backend, streamName)).toHaveLength(
+          1,
+        );
+      });
+      await expect(readStreamEvents(backend, streamName)).resolves.toEqual([]);
     });
   });
 }

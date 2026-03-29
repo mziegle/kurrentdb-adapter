@@ -29,7 +29,7 @@ export function registerStreamMetadataContractSuite(
       });
     });
 
-    it('applies maxCount to stream reads and $all reads', async () => {
+    it('applies maxCount to stream reads while leaving pre-scavenge history visible in $all', async () => {
       const streamName = context.createStreamName('stream-metadata-max-count');
 
       await context
@@ -88,7 +88,7 @@ export function registerStreamMetadataContractSuite(
       ]);
     });
 
-    it('applies truncateBefore to stream reads', async () => {
+    it('applies truncateBefore to stream reads while leaving pre-scavenge history visible in $all', async () => {
       const streamName = context.createStreamName('stream-metadata-truncate');
 
       await context
@@ -121,9 +121,29 @@ export function registerStreamMetadataContractSuite(
           data: { step: 3 },
         },
       ]);
+
+      const allEvents = await readAllEventsForStream(context, streamName);
+
+      expect(allEvents).toMatchObject([
+        {
+          streamId: streamName,
+          type: 'booking-created',
+          data: { step: 1 },
+        },
+        {
+          streamId: streamName,
+          type: 'booking-confirmed',
+          data: { step: 2 },
+        },
+        {
+          streamId: streamName,
+          type: 'booking-completed',
+          data: { step: 3 },
+        },
+      ]);
     });
 
-    it('applies maxAge to stream reads and $all reads', async () => {
+    it('applies maxAge to stream reads while leaving pre-scavenge history visible in $all', async () => {
       const streamName = context.createStreamName('stream-metadata-max-age');
 
       await context

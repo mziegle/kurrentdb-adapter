@@ -7,6 +7,8 @@ import {
 import { once } from 'node:events';
 import { StreamsContractContext } from '../contract-test-context';
 
+const SUBSCRIPTION_TIMEOUT_MS = 10_000;
+
 export function registerSubscriptionContractSuite(
   context: StreamsContractContext,
 ): void {
@@ -32,11 +34,14 @@ export function registerSubscriptionContractSuite(
           fromRevision: END,
         });
 
-      await once(subscription, 'caughtUp');
+      await waitForCaughtUp(subscription, `${streamName} stream caught-up`);
 
       const iterator = subscription[Symbol.asyncIterator]();
       let settled = false;
-      const nextEventPromise = iterator.next().then((result) => {
+      const nextEventPromise = waitForIteratorNext(
+        iterator,
+        `${streamName} next live stream event`,
+      ).then((result) => {
         settled = true;
         return result;
       });
@@ -94,7 +99,9 @@ export function registerSubscriptionContractSuite(
 
       const iterator = subscription[Symbol.asyncIterator]();
 
-      await expect(iterator.next()).resolves.toMatchObject({
+      await expect(
+        waitForIteratorNext(iterator, `${streamName} historical event #1`),
+      ).resolves.toMatchObject({
         done: false,
         value: {
           event: {
@@ -104,7 +111,9 @@ export function registerSubscriptionContractSuite(
         },
       });
 
-      await expect(iterator.next()).resolves.toMatchObject({
+      await expect(
+        waitForIteratorNext(iterator, `${streamName} historical event #2`),
+      ).resolves.toMatchObject({
         done: false,
         value: {
           event: {
@@ -114,9 +123,12 @@ export function registerSubscriptionContractSuite(
         },
       });
 
-      await once(subscription, 'caughtUp');
+      await waitForCaughtUp(subscription, `${streamName} stream caught-up`);
 
-      const liveEventPromise = iterator.next();
+      const liveEventPromise = waitForIteratorNext(
+        iterator,
+        `${streamName} live event after catch-up`,
+      );
 
       await context
         .backend()
@@ -152,11 +164,14 @@ export function registerSubscriptionContractSuite(
           fromRevision: START,
         });
 
-      await once(subscription, 'caughtUp');
+      await waitForCaughtUp(subscription, `${streamName} stream caught-up`);
       await subscription.unsubscribe();
 
       const iterator = subscription[Symbol.asyncIterator]();
-      const nextEventPromise = iterator.next();
+      const nextEventPromise = waitForIteratorNext(
+        iterator,
+        `${streamName} post-unsubscribe next result`,
+      );
 
       await context
         .backend()
@@ -191,15 +206,21 @@ export function registerSubscriptionContractSuite(
         });
 
       await Promise.all([
-        once(firstSubscription, 'caughtUp'),
-        once(secondSubscription, 'caughtUp'),
+        waitForCaughtUp(firstSubscription, `${streamName} first caught-up`),
+        waitForCaughtUp(secondSubscription, `${streamName} second caught-up`),
       ]);
 
       const firstIterator = firstSubscription[Symbol.asyncIterator]();
       const secondIterator = secondSubscription[Symbol.asyncIterator]();
 
-      const firstEventPromise = firstIterator.next();
-      const secondEventPromise = secondIterator.next();
+      const firstEventPromise = waitForIteratorNext(
+        firstIterator,
+        `${streamName} first subscriber live event`,
+      );
+      const secondEventPromise = waitForIteratorNext(
+        secondIterator,
+        `${streamName} second subscriber live event`,
+      );
 
       await context
         .backend()
@@ -257,11 +278,14 @@ export function registerSubscriptionContractSuite(
         fromPosition: END,
       });
 
-      await once(subscription, 'caughtUp');
+      await waitForCaughtUp(subscription, '$all caught-up from end');
 
       const iterator = subscription[Symbol.asyncIterator]();
       let settled = false;
-      const nextEventPromise = iterator.next().then((result) => {
+      const nextEventPromise = waitForIteratorNext(
+        iterator,
+        '$all next live event',
+      ).then((result) => {
         settled = true;
         return result;
       });
@@ -344,10 +368,13 @@ export function registerSubscriptionContractSuite(
         },
       });
 
-      await once(subscription, 'caughtUp');
+      await waitForCaughtUp(subscription, '$all caught-up from start');
 
       const thirdStreamName = context.createStreamName('all-start-third');
-      const liveEventPromise = iterator.next();
+      const liveEventPromise = waitForIteratorNext(
+        iterator,
+        `${thirdStreamName} live $all event`,
+      );
 
       await context
         .backend()
@@ -412,7 +439,12 @@ export function registerSubscriptionContractSuite(
         });
       const iterator = subscription[Symbol.asyncIterator]();
 
-      await expect(iterator.next()).resolves.toMatchObject({
+      await expect(
+        waitForIteratorNext(
+          iterator,
+          `${includedHistoricalStream} filtered historical event`,
+        ),
+      ).resolves.toMatchObject({
         done: false,
         value: {
           event: {
@@ -423,10 +455,13 @@ export function registerSubscriptionContractSuite(
         },
       });
 
-      await once(subscription, 'caughtUp');
+      await waitForCaughtUp(subscription, '$all filtered caught-up');
 
       let settled = false;
-      const nextEventPromise = iterator.next().then((result) => {
+      const nextEventPromise = waitForIteratorNext(
+        iterator,
+        `${includedLiveStream} filtered live event`,
+      ).then((result) => {
         settled = true;
         return result;
       });
@@ -477,7 +512,10 @@ async function nextEventForStream(
   streamId: string,
 ): Promise<unknown> {
   while (true) {
-    const result = await iterator.next();
+    const result = await waitForIteratorNext(
+      iterator,
+      `${streamId} event in stream-filtered iteration`,
+    );
     if (result.done) {
       throw new Error(`Subscription completed before receiving ${streamId}.`);
     }
@@ -494,4 +532,38 @@ async function nextEventForStream(
       return result.value;
     }
   }
+}
+
+function waitForCaughtUp(
+  subscription: NodeJS.EventEmitter,
+  label: string,
+): Promise<unknown[]> {
+  return withTimeout(once(subscription, 'caughtUp'), label);
+}
+
+function waitForIteratorNext<T>(
+  iterator: AsyncIterator<T>,
+  label: string,
+): Promise<IteratorResult<T>> {
+  return withTimeout(iterator.next(), label);
+}
+
+function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(
+        new Error(
+          `${label} did not complete within ${SUBSCRIPTION_TIMEOUT_MS}ms.`,
+        ),
+      );
+    }, SUBSCRIPTION_TIMEOUT_MS);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  });
 }

@@ -38,6 +38,7 @@ import { Timestamp } from './interfaces/google/protobuf/timestamp';
 type PersistedEventRow = {
   global_position: string | number;
   stream_name: string;
+  stream_generation?: string | number;
   stream_revision: string | number;
   event_id: string;
   created_at: Date | string;
@@ -47,10 +48,18 @@ type PersistedEventRow = {
 };
 
 type StreamRetentionPolicy = {
+  currentGeneration: number;
   currentRevision: number | null;
+  deletedAt: Date | string | null;
   maxAge: number | null;
   maxCount: number | null;
   truncateBefore: number | null;
+};
+
+type StreamStateRow = {
+  current_generation: string | number | null;
+  current_revision: string | number | null;
+  deleted_at: Date | string | null;
 };
 
 type LongLike = {
@@ -114,19 +123,35 @@ export class PostgresEventStoreService
       CREATE TABLE IF NOT EXISTS stream_events (
         global_position BIGSERIAL PRIMARY KEY,
         stream_name TEXT NOT NULL,
+        stream_generation BIGINT NOT NULL DEFAULT 0,
         stream_revision BIGINT NOT NULL,
         event_id UUID NOT NULL UNIQUE,
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
         custom_metadata BYTEA NOT NULL DEFAULT '\\x',
         data BYTEA NOT NULL DEFAULT '\\x',
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (stream_name, stream_revision)
+        UNIQUE (stream_name, stream_generation, stream_revision)
       )
     `);
 
     await this.pool.query(`
+      ALTER TABLE stream_events
+      ADD COLUMN IF NOT EXISTS stream_generation BIGINT NOT NULL DEFAULT 0
+    `);
+
+    await this.pool.query(`
+      ALTER TABLE stream_events
+      DROP CONSTRAINT IF EXISTS stream_events_stream_name_stream_revision_key
+    `);
+
+    await this.pool.query(`
       CREATE INDEX IF NOT EXISTS idx_stream_events_stream_revision
-      ON stream_events (stream_name, stream_revision)
+      ON stream_events (stream_name, stream_generation, stream_revision)
+    `);
+
+    await this.pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_stream_events_stream_generation_revision_unique
+      ON stream_events (stream_name, stream_generation, stream_revision)
     `);
 
     await this.pool.query(`
@@ -140,11 +165,23 @@ export class PostgresEventStoreService
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS stream_retention_policies (
         stream_name TEXT PRIMARY KEY,
+        current_generation BIGINT NOT NULL DEFAULT 0,
         current_revision BIGINT NULL,
+        deleted_at TIMESTAMPTZ NULL,
         max_age BIGINT NULL,
         max_count BIGINT NULL,
         truncate_before BIGINT NULL
       )
+    `);
+
+    await this.pool.query(`
+      ALTER TABLE stream_retention_policies
+      ADD COLUMN IF NOT EXISTS current_generation BIGINT NOT NULL DEFAULT 0
+    `);
+
+    await this.pool.query(`
+      ALTER TABLE stream_retention_policies
+      ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL
     `);
 
     await this.pool.query(`
@@ -185,7 +222,11 @@ export class PostgresEventStoreService
     try {
       await client.query('BEGIN');
 
-      const currentRevision = await this.getCurrentRevision(client, streamName);
+      const streamState = await this.getStreamRetentionPolicy(
+        client,
+        streamName,
+      );
+      const currentRevision = this.getReadableCurrentRevision(streamState);
       const mismatch = this.getExpectedVersionMismatch(
         options,
         currentRevision,
@@ -195,7 +236,10 @@ export class PostgresEventStoreService
         return mismatch;
       }
 
-      let nextRevision = currentRevision ?? -1;
+      const targetGeneration = streamState.deletedAt
+        ? streamState.currentGeneration + 1
+        : streamState.currentGeneration;
+      let nextRevision = streamState.currentRevision ?? -1;
       let lastPosition = currentRevision === null ? null : 0;
 
       for (const proposedMessage of proposedMessages) {
@@ -205,17 +249,19 @@ export class PostgresEventStoreService
           `
             INSERT INTO stream_events (
               stream_name,
+              stream_generation,
               stream_revision,
               event_id,
               metadata,
               custom_metadata,
               data
             )
-            VALUES ($1, $2, $3::uuid, $4::jsonb, $5, $6)
+            VALUES ($1, $2, $3, $4::uuid, $5::jsonb, $6, $7)
             RETURNING global_position
           `,
           [
             streamName,
+            targetGeneration,
             nextRevision,
             this.getEventId(proposedMessage.id),
             JSON.stringify(proposedMessage.metadata ?? {}),
@@ -231,6 +277,7 @@ export class PostgresEventStoreService
         await this.upsertStreamCurrentRevision(
           client,
           streamName,
+          targetGeneration,
           nextRevision,
         );
       }
@@ -445,6 +492,13 @@ export class PostgresEventStoreService
     options: NonNullable<ReadReq['options']>,
     isCancelled: () => boolean,
   ): AsyncGenerator<ReadResp> {
+    const streamState = await this.getStreamRetentionPolicy(
+      this.pool,
+      streamName,
+    );
+    const activeGeneration = streamState.deletedAt
+      ? streamState.currentGeneration + 1
+      : streamState.currentGeneration;
     let nextRevisionExclusive = await this.resolveStreamSubscriptionBoundary(
       streamName,
       options,
@@ -455,6 +509,7 @@ export class PostgresEventStoreService
       const versionBeforeRead = this.getStreamVersion(streamName);
       const rows = await this.readStreamSubscriptionRows(
         streamName,
+        activeGeneration,
         nextRevisionExclusive,
       );
 
@@ -583,7 +638,11 @@ export class PostgresEventStoreService
     try {
       await client.query('BEGIN');
 
-      const currentRevision = await this.getCurrentRevision(client, streamName);
+      const streamState = await this.getStreamRetentionPolicy(
+        client,
+        streamName,
+      );
+      const currentRevision = this.getReadableCurrentRevision(streamState);
       const mismatch = this.getDeleteExpectedVersionMismatch(
         options,
         currentRevision,
@@ -599,30 +658,32 @@ export class PostgresEventStoreService
         return { noPosition: {} };
       }
 
-      const deleted = await client.query<{ global_position: string | number }>(
+      const lastEvent = await client.query<{
+        global_position: string | number;
+      }>(
         `
-          DELETE FROM stream_events
+          SELECT global_position
+          FROM stream_events
           WHERE stream_name = $1
-          RETURNING global_position
+            AND stream_generation = $2
+          ORDER BY stream_revision DESC
+          LIMIT 1
         `,
-        [streamName],
+        [streamName, streamState.currentGeneration],
       );
 
-      await client.query(
-        `
-          UPDATE stream_retention_policies
-          SET current_revision = NULL
-          WHERE stream_name = $1
-        `,
-        [streamName],
+      await this.markStreamDeleted(
+        client,
+        streamName,
+        streamState.currentGeneration,
+        streamState.currentRevision,
       );
 
       await client.query('COMMIT');
 
-      const lastPosition = deleted.rows.reduce(
-        (max, row) => Math.max(max, this.toNumber(row.global_position)),
-        0,
-      );
+      this.notifyStreamUpdated(streamName);
+
+      const lastPosition = this.toNumber(lastEvent.rows[0].global_position);
 
       return {
         position: {
@@ -661,7 +722,11 @@ export class PostgresEventStoreService
         throw new StreamDeletedServiceError(streamName);
       }
 
-      const currentRevision = await this.getCurrentRevision(client, streamName);
+      const streamState = await this.getStreamRetentionPolicy(
+        client,
+        streamName,
+      );
+      const currentRevision = this.getReadableCurrentRevision(streamState);
       const mismatch = this.getTombstoneExpectedVersionMismatch(
         options,
         currentRevision,
@@ -672,19 +737,59 @@ export class PostgresEventStoreService
         throw mismatch;
       }
 
-      const deleted = await client.query<{ global_position: string | number }>(
+      const lastEvent = await client.query<{
+        global_position: string | number;
+      }>(
         `
-          DELETE FROM stream_events
+          SELECT global_position
+          FROM stream_events
           WHERE stream_name = $1
-          RETURNING global_position
+            AND stream_generation = $2
+          ORDER BY stream_revision DESC
+          LIMIT 1
         `,
-        [streamName],
+        [streamName, streamState.currentGeneration],
       );
 
-      const lastPosition = deleted.rows.reduce(
-        (max, row) => Math.max(max, this.toNumber(row.global_position)),
-        0,
+      let nextRevision = streamState.currentRevision ?? -1;
+      let lastPosition =
+        lastEvent.rows.length === 0
+          ? 0
+          : this.toNumber(lastEvent.rows[0].global_position);
+
+      nextRevision += 1;
+
+      const tombstoneEvent = await client.query<{
+        global_position: string | number;
+      }>(
+        `
+          INSERT INTO stream_events (
+            stream_name,
+            stream_generation,
+            stream_revision,
+            event_id,
+            metadata,
+            custom_metadata,
+            data
+          )
+          VALUES ($1, $2, $3, $4::uuid, $5::jsonb, $6, $7)
+          RETURNING global_position
+        `,
+        [
+          streamName,
+          streamState.currentGeneration,
+          nextRevision,
+          randomUUID(),
+          JSON.stringify({
+            type: '$streamDeleted',
+            'content-type': 'application/octet-stream',
+          }),
+          Buffer.alloc(0),
+          Buffer.alloc(0),
+        ],
       );
+
+      lastPosition = this.toNumber(tombstoneEvent.rows[0].global_position);
 
       await client.query(
         `
@@ -696,16 +801,16 @@ export class PostgresEventStoreService
         [streamName, lastPosition],
       );
 
-      await client.query(
-        `
-          UPDATE stream_retention_policies
-          SET current_revision = NULL
-          WHERE stream_name = $1
-        `,
-        [streamName],
+      await this.markStreamDeleted(
+        client,
+        streamName,
+        streamState.currentGeneration,
+        nextRevision,
       );
 
       await client.query('COMMIT');
+
+      this.notifyStreamUpdated(streamName);
 
       return {
         position: {
@@ -770,48 +875,99 @@ export class PostgresEventStoreService
     client: PoolClient | Pool,
     streamName: string,
   ): Promise<number | null> {
-    const retainedRevision = await client.query<{
-      current_revision: string | number | null;
-    }>(
+    const streamState = await this.getStreamRetentionPolicy(client, streamName);
+    return this.getReadableCurrentRevision(streamState);
+  }
+
+  private async getStreamRetentionPolicy(
+    client: PoolClient | Pool,
+    streamName: string,
+  ): Promise<StreamRetentionPolicy> {
+    const policyResult = await client.query<
+      StreamStateRow & {
+        max_age: string | number | null;
+        max_count: string | number | null;
+        truncate_before: string | number | null;
+      }
+    >(
       `
-        SELECT current_revision
+        SELECT
+          current_generation,
+          current_revision,
+          deleted_at,
+          max_age,
+          max_count,
+          truncate_before
         FROM stream_retention_policies
         WHERE stream_name = $1
       `,
       [streamName],
     );
 
-    if (retainedRevision.rows.length > 0) {
-      const currentRevision = retainedRevision.rows[0].current_revision;
-      if (currentRevision !== null) {
-        return this.toNumber(currentRevision);
-      }
+    if (policyResult.rows.length > 0) {
+      const row = policyResult.rows[0];
+      return {
+        currentGeneration: this.toNumber(row.current_generation ?? 0),
+        currentRevision:
+          row.current_revision === null
+            ? null
+            : this.toNumber(row.current_revision),
+        deletedAt: row.deleted_at,
+        maxAge: row.max_age === null ? null : this.toNumber(row.max_age),
+        maxCount: row.max_count === null ? null : this.toNumber(row.max_count),
+        truncateBefore:
+          row.truncate_before === null
+            ? null
+            : this.toNumber(row.truncate_before),
+      };
     }
 
-    const result = await client.query<{ stream_revision: string | number }>(
+    const fallbackResult = await client.query<{
+      stream_generation: string | number;
+      stream_revision: string | number;
+    }>(
       `
-        SELECT stream_revision
+        SELECT stream_generation, stream_revision
         FROM stream_events
         WHERE stream_name = $1
-        ORDER BY stream_revision DESC
+        ORDER BY stream_generation DESC, stream_revision DESC
         LIMIT 1
       `,
       [streamName],
     );
 
-    if (result.rows.length === 0) {
-      return null;
+    if (fallbackResult.rows.length === 0) {
+      return {
+        currentGeneration: 0,
+        currentRevision: null,
+        deletedAt: null,
+        maxAge: null,
+        maxCount: null,
+        truncateBefore: null,
+      };
     }
 
-    return this.toNumber(result.rows[0].stream_revision);
+    return {
+      currentGeneration: this.toNumber(
+        fallbackResult.rows[0].stream_generation,
+      ),
+      currentRevision: this.toNumber(fallbackResult.rows[0].stream_revision),
+      deletedAt: null,
+      maxAge: null,
+      maxCount: null,
+      truncateBefore: null,
+    };
   }
 
   private async readStreamSnapshot(
     streamName: string,
     options: NonNullable<ReadReq['options']>,
   ): Promise<ReadResp[]> {
-    const exists = await this.streamExists(streamName);
-    if (!exists) {
+    const streamState = await this.getStreamRetentionPolicy(
+      this.pool,
+      streamName,
+    );
+    if (this.getReadableCurrentRevision(streamState) === null) {
       return [
         {
           streamNotFound: {
@@ -830,11 +986,17 @@ export class PostgresEventStoreService
     const comparator = isBackwards ? '<=' : '>=';
     const boundary = this.resolveReadBoundary(options);
 
-    const params: Array<number | string> = [streamName];
-    let whereClause = 'WHERE events.stream_name = $1';
+    const params: Array<number | string> = [
+      streamName,
+      streamState.currentGeneration,
+    ];
+    let whereClause =
+      'WHERE events.stream_name = $1 AND events.stream_generation = $2';
     if (boundary !== null) {
       params.push(boundary);
-      whereClause += ` AND events.stream_revision ${comparator} $2`;
+      whereClause += ` AND events.stream_revision ${comparator} $${
+        params.length
+      }`;
     }
 
     params.push(limit);
@@ -925,6 +1087,14 @@ export class PostgresEventStoreService
     streamName: string,
     options: NonNullable<ReadReq['options']>,
   ): Promise<number> {
+    const streamState = await this.getStreamRetentionPolicy(
+      this.pool,
+      streamName,
+    );
+    if (this.getReadableCurrentRevision(streamState) === null) {
+      return -1;
+    }
+
     const stream = options.stream;
     if (!stream) {
       return -1;
@@ -962,6 +1132,7 @@ export class PostgresEventStoreService
 
   private async readStreamSubscriptionRows(
     streamName: string,
+    streamGeneration: number,
     nextRevisionExclusive: number,
   ): Promise<PersistedEventRow[]> {
     const result = await this.pool.query<PersistedEventRow>(
@@ -969,6 +1140,7 @@ export class PostgresEventStoreService
         SELECT
           events.global_position,
           events.stream_name,
+          events.stream_generation,
           events.stream_revision,
           events.event_id,
           events.created_at,
@@ -979,12 +1151,13 @@ export class PostgresEventStoreService
         LEFT JOIN stream_retention_policies retention
           ON retention.stream_name = events.stream_name
         WHERE events.stream_name = $1
-          AND events.stream_revision > $2
+          AND events.stream_generation = $2
+          AND events.stream_revision > $3
           AND ${this.buildRetentionVisibilityClause('events', 'retention')}
         ORDER BY events.stream_revision ASC
         LIMIT 100
       `,
-      [streamName, nextRevisionExclusive],
+      [streamName, streamGeneration, nextRevisionExclusive],
     );
 
     return result.rows;
@@ -1199,24 +1372,6 @@ export class PostgresEventStoreService
     });
   }
 
-  private async streamExists(streamName: string): Promise<boolean> {
-    const result = await this.pool.query<{ exists: boolean }>(
-      `
-        SELECT EXISTS(
-          SELECT 1
-          FROM stream_retention_policies
-          WHERE stream_name = $1
-            AND current_revision IS NOT NULL
-        ) OR EXISTS(
-          SELECT 1 FROM stream_events WHERE stream_name = $1
-        ) AS exists
-      `,
-      [streamName],
-    );
-
-    return result.rows[0]?.exists ?? false;
-  }
-
   private async getCurrentGlobalPosition(): Promise<number | null> {
     const result = await this.pool.query<{ global_position: string | number }>(
       `
@@ -1264,7 +1419,13 @@ export class PostgresEventStoreService
           FROM stream_events events
           LEFT JOIN stream_retention_policies retention
             ON retention.stream_name = events.stream_name
-          WHERE NOT ${this.buildRetentionVisibilityClause('events', 'retention')}
+          LEFT JOIN tombstoned_streams tombstones
+            ON tombstones.stream_name = events.stream_name
+          WHERE ${this.buildScavengeEligibilityClause(
+            'events',
+            'retention',
+            'tombstones',
+          )}
           ORDER BY events.global_position ASC
           LIMIT $1
         )
@@ -1282,34 +1443,48 @@ export class PostgresEventStoreService
   private async upsertStreamCurrentRevision(
     client: PoolClient,
     streamName: string,
+    currentGeneration: number,
     currentRevision: number,
   ): Promise<void> {
     await client.query(
       `
-        INSERT INTO stream_retention_policies (stream_name, current_revision)
-        VALUES ($1, $2)
+        INSERT INTO stream_retention_policies (
+          stream_name,
+          current_generation,
+          current_revision,
+          deleted_at
+        )
+        VALUES ($1, $2, $3, NULL)
         ON CONFLICT (stream_name)
-        DO UPDATE SET current_revision = EXCLUDED.current_revision
+        DO UPDATE SET
+          current_generation = EXCLUDED.current_generation,
+          current_revision = EXCLUDED.current_revision,
+          deleted_at = NULL
       `,
-      [streamName, currentRevision],
+      [streamName, currentGeneration, currentRevision],
     );
   }
 
   private async upsertStreamRetentionPolicy(
     client: PoolClient,
     streamName: string,
-    policy: Omit<StreamRetentionPolicy, 'currentRevision'>,
+    policy: Omit<
+      StreamRetentionPolicy,
+      'currentGeneration' | 'currentRevision' | 'deletedAt'
+    >,
   ): Promise<void> {
     await client.query(
       `
         INSERT INTO stream_retention_policies (
           stream_name,
+          current_generation,
           current_revision,
+          deleted_at,
           max_age,
           max_count,
           truncate_before
         )
-        VALUES ($1, NULL, $2, $3, $4)
+        VALUES ($1, 0, NULL, NULL, $2, $3, $4)
         ON CONFLICT (stream_name)
         DO UPDATE SET
           max_age = EXCLUDED.max_age,
@@ -1320,18 +1495,49 @@ export class PostgresEventStoreService
     );
   }
 
+  private async markStreamDeleted(
+    client: PoolClient,
+    streamName: string,
+    currentGeneration: number,
+    currentRevision: number | null,
+  ): Promise<void> {
+    await client.query(
+      `
+        INSERT INTO stream_retention_policies (
+          stream_name,
+          current_generation,
+          current_revision,
+          deleted_at
+        )
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (stream_name)
+        DO UPDATE SET
+          current_generation = EXCLUDED.current_generation,
+          current_revision = EXCLUDED.current_revision,
+          deleted_at = EXCLUDED.deleted_at
+      `,
+      [streamName, currentGeneration, currentRevision],
+    );
+  }
+
   private parseMetadataPolicyUpdate(
     streamName: string,
     proposedMessages: AppendReq_ProposedMessage[],
   ): {
     streamName: string;
-    policy: Omit<StreamRetentionPolicy, 'currentRevision'>;
+    policy: Omit<
+      StreamRetentionPolicy,
+      'currentGeneration' | 'currentRevision' | 'deletedAt'
+    >;
   } | null {
     if (!this.isMetastream(streamName)) {
       return null;
     }
 
-    let policy: Omit<StreamRetentionPolicy, 'currentRevision'> | null = null;
+    let policy: Omit<
+      StreamRetentionPolicy,
+      'currentGeneration' | 'currentRevision' | 'deletedAt'
+    > | null = null;
     for (const message of proposedMessages) {
       const metadata = message.metadata ?? {};
       if (
@@ -1409,6 +1615,48 @@ export class PostgresEventStoreService
         OR ${eventsAlias}.stream_revision > ${retentionAlias}.current_revision - ${retentionAlias}.max_count
       )
     )`;
+  }
+
+  private buildScavengeEligibilityClause(
+    eventsAlias: string,
+    retentionAlias: string,
+    tombstonesAlias: string,
+  ): string {
+    return `(
+      (
+        ${tombstonesAlias}.stream_name IS NOT NULL
+        AND (
+          ${retentionAlias}.current_revision IS NULL
+          OR ${eventsAlias}.stream_revision <> ${retentionAlias}.current_revision
+        )
+      )
+      OR (
+        ${retentionAlias}.deleted_at IS NOT NULL
+        AND (
+          ${retentionAlias}.current_revision IS NULL
+          OR ${eventsAlias}.stream_revision <> ${retentionAlias}.current_revision
+        )
+      )
+      OR ${eventsAlias}.stream_generation < COALESCE(${retentionAlias}.current_generation, 0)
+      OR (
+        ${eventsAlias}.stream_generation = COALESCE(${retentionAlias}.current_generation, 0)
+        AND NOT ${this.buildRetentionVisibilityClause(eventsAlias, retentionAlias)}
+        AND (
+          ${retentionAlias}.current_revision IS NULL
+          OR ${eventsAlias}.stream_revision <> ${retentionAlias}.current_revision
+        )
+      )
+    )`;
+  }
+
+  private getReadableCurrentRevision(
+    streamState: Pick<StreamRetentionPolicy, 'currentRevision' | 'deletedAt'>,
+  ): number | null {
+    if (streamState.deletedAt) {
+      return null;
+    }
+
+    return streamState.currentRevision;
   }
 
   private async isStreamTombstoned(

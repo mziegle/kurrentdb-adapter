@@ -1,4 +1,10 @@
-import { StreamDeletedError, jsonEvent } from '@kurrent/kurrentdb-client';
+import {
+  FORWARDS,
+  START,
+  StreamDeletedError,
+  jsonEvent,
+  streamNameFilter,
+} from '@kurrent/kurrentdb-client';
 import { StreamsContractContext } from '../contract-test-context';
 
 export function registerTombstoneContractSuite(
@@ -38,6 +44,20 @@ export function registerTombstoneContractSuite(
             }),
           ),
       ).rejects.toBeInstanceOf(StreamDeletedError);
+
+      const allEvents = await readAllEventsForStream(context, streamName);
+      expect(allEvents).toMatchObject([
+        {
+          streamId: streamName,
+          type: 'booking-created',
+          data: { step: 1 },
+        },
+        {
+          streamId: streamName,
+          type: '$streamDeleted',
+          data: [],
+        },
+      ]);
     });
 
     it('rejects stale expected revisions when tombstoning and keeps the stream usable', async () => {
@@ -104,4 +124,36 @@ export function registerTombstoneContractSuite(
       });
     });
   });
+}
+
+async function readAllEventsForStream(
+  context: StreamsContractContext,
+  streamName: string,
+): Promise<Array<{ streamId: string; type: string; data: unknown }>> {
+  const events = context
+    .backend()
+    .getClient()
+    .readAll({
+      fromPosition: START,
+      direction: FORWARDS,
+      maxCount: 500,
+      filter: streamNameFilter({
+        prefixes: [streamName],
+      }),
+    });
+
+  const received: Array<{ streamId: string; type: string; data: unknown }> = [];
+  for await (const { event } of events) {
+    if (!event) {
+      continue;
+    }
+
+    received.push({
+      streamId: event.streamId,
+      type: event.type,
+      data: event.data,
+    });
+  }
+
+  return received;
 }
