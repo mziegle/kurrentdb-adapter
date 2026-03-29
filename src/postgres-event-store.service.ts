@@ -25,6 +25,12 @@ import {
   TombstoneReq,
   TombstoneResp,
 } from './interfaces/streams';
+import {
+  ScavengeResp,
+  ScavengeResp_ScavengeResult,
+  StartScavengeReq,
+  StopScavengeReq,
+} from './interfaces/operations';
 import { Code } from './interfaces/code';
 import { Any } from './interfaces/google/protobuf/any';
 import { Timestamp } from './interfaces/google/protobuf/timestamp';
@@ -82,6 +88,10 @@ type WrongExpectedVersionMessageConstructor =
 type StreamIdentifierMessageConstructor = new () => StreamIdentifierMessage;
 type StreamDeletedMessageConstructor = new () => StreamDeletedMessage;
 
+type ActiveScavenge = {
+  cancelled: boolean;
+};
+
 export class StreamDeletedServiceError extends Error {
   constructor(readonly streamName: string) {
     super(`Stream "${streamName}" is deleted.`);
@@ -93,9 +103,11 @@ export class PostgresEventStoreService
   implements OnModuleInit, OnModuleDestroy
 {
   private static readonly ALL_STREAM_KEY = '$all';
+  private static readonly SCAVENGE_BATCH_SIZE = 500;
   private readonly pool = new Pool(this.getPoolConfig());
   private readonly streamVersions = new Map<string, number>();
   private readonly streamListeners = new Map<string, Set<() => void>>();
+  private readonly activeScavenges = new Map<string, ActiveScavenge>();
 
   async onModuleInit(): Promise<void> {
     await this.pool.query(`
@@ -709,6 +721,37 @@ export class PostgresEventStoreService
     }
   }
 
+  startScavenge(request: StartScavengeReq): ScavengeResp {
+    void request;
+
+    const scavengeId = randomUUID();
+    const activeScavenge: ActiveScavenge = {
+      cancelled: false,
+    };
+
+    this.activeScavenges.set(scavengeId, activeScavenge);
+    void this.runScavenge(scavengeId, activeScavenge);
+
+    return {
+      scavengeId,
+      scavengeResult: ScavengeResp_ScavengeResult.Started,
+    };
+  }
+
+  stopScavenge(request: StopScavengeReq): ScavengeResp {
+    const scavengeId = request.options?.scavengeId ?? '';
+    const activeScavenge = this.activeScavenges.get(scavengeId);
+
+    if (activeScavenge) {
+      activeScavenge.cancelled = true;
+    }
+
+    return {
+      scavengeId,
+      scavengeResult: ScavengeResp_ScavengeResult.Stopped,
+    };
+  }
+
   private getPoolConfig(): ConstructorParameters<typeof Pool>[0] {
     if (process.env.POSTGRES_URL) {
       return { connectionString: process.env.POSTGRES_URL };
@@ -727,6 +770,24 @@ export class PostgresEventStoreService
     client: PoolClient | Pool,
     streamName: string,
   ): Promise<number | null> {
+    const retainedRevision = await client.query<{
+      current_revision: string | number | null;
+    }>(
+      `
+        SELECT current_revision
+        FROM stream_retention_policies
+        WHERE stream_name = $1
+      `,
+      [streamName],
+    );
+
+    if (retainedRevision.rows.length > 0) {
+      const currentRevision = retainedRevision.rows[0].current_revision;
+      if (currentRevision !== null) {
+        return this.toNumber(currentRevision);
+      }
+    }
+
     const result = await client.query<{ stream_revision: string | number }>(
       `
         SELECT stream_revision
@@ -1142,6 +1203,11 @@ export class PostgresEventStoreService
     const result = await this.pool.query<{ exists: boolean }>(
       `
         SELECT EXISTS(
+          SELECT 1
+          FROM stream_retention_policies
+          WHERE stream_name = $1
+            AND current_revision IS NOT NULL
+        ) OR EXISTS(
           SELECT 1 FROM stream_events WHERE stream_name = $1
         ) AS exists
       `,
@@ -1172,6 +1238,45 @@ export class PostgresEventStoreService
     if (await this.isStreamTombstoned(streamName)) {
       throw new StreamDeletedServiceError(streamName);
     }
+  }
+
+  private async runScavenge(
+    scavengeId: string,
+    activeScavenge: ActiveScavenge,
+  ): Promise<void> {
+    try {
+      while (!activeScavenge.cancelled) {
+        const deletedCount = await this.deleteScavengedBatch();
+        if (deletedCount === 0) {
+          return;
+        }
+      }
+    } finally {
+      this.activeScavenges.delete(scavengeId);
+    }
+  }
+
+  private async deleteScavengedBatch(): Promise<number> {
+    const result = await this.pool.query<{ deleted_count: string | number }>(
+      `
+        WITH doomed AS (
+          SELECT events.ctid
+          FROM stream_events events
+          LEFT JOIN stream_retention_policies retention
+            ON retention.stream_name = events.stream_name
+          WHERE NOT ${this.buildRetentionVisibilityClause('events', 'retention')}
+          ORDER BY events.global_position ASC
+          LIMIT $1
+        )
+        DELETE FROM stream_events events
+        USING doomed
+        WHERE events.ctid = doomed.ctid
+        RETURNING 1 AS deleted_count
+      `,
+      [PostgresEventStoreService.SCAVENGE_BATCH_SIZE],
+    );
+
+    return result.rows.length;
   }
 
   private async upsertStreamCurrentRevision(

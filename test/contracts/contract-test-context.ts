@@ -19,6 +19,10 @@ export type StreamsContractBackend = {
   supportsRestart: boolean;
 };
 
+export type ScavengeCapableBackend = StreamsContractBackend & {
+  startScavenge(): Promise<{ scavengeId: string; scavengeResult: number }>;
+};
+
 export type StreamsContractContext = {
   backend(): StreamsContractBackend;
   backendName: string;

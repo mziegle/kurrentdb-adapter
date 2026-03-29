@@ -3,33 +3,27 @@ import {
   OperationsController,
   OperationsControllerMethods,
   ScavengeResp,
-  ScavengeResp_ScavengeResult,
   SetNodePriorityReq,
   StartScavengeReq,
   StopScavengeReq,
 } from './interfaces/operations';
 import { Empty } from './interfaces/shared';
-import { createScavengeResponse } from './stub-utils';
 import { logHotPath } from './debug-log';
+import { PostgresEventStoreService } from './postgres-event-store.service';
 
 @Controller()
 @OperationsControllerMethods()
 export class OperationsStubController implements OperationsController {
+  constructor(private readonly eventStore: PostgresEventStoreService) {}
+
   startScavenge(request: StartScavengeReq): ScavengeResp {
-    void request;
     logHotPath('gRPC Operations.StartScavenge');
-    return createScavengeResponse(
-      'stub-scavenge',
-      ScavengeResp_ScavengeResult.Started,
-    );
+    return this.eventStore.startScavenge(request);
   }
 
   stopScavenge(request: StopScavengeReq): ScavengeResp {
     logHotPath('gRPC Operations.StopScavenge');
-    return createScavengeResponse(
-      request.options?.scavengeId ?? 'stub-scavenge',
-      ScavengeResp_ScavengeResult.Stopped,
-    );
+    return this.eventStore.stopScavenge(request);
   }
 
   shutdown(request: Empty): Empty {

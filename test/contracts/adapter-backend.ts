@@ -2,6 +2,15 @@ import { INestMicroservice } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Transport } from '@nestjs/microservices';
 import { KurrentDBClient } from '@kurrent/kurrentdb-client';
+import { credentials } from '@grpc/grpc-js';
+import {
+  OperationsClient,
+  IOperationsClient,
+} from '@kurrent/kurrentdb-client/generated/kurrentdb/protocols/v1/operations_grpc_pb';
+import {
+  ScavengeResp,
+  StartScavengeReq,
+} from '@kurrent/kurrentdb-client/generated/kurrentdb/protocols/v1/operations_pb';
 import {
   PostgreSqlContainer,
   StartedPostgreSqlContainer,
@@ -10,11 +19,14 @@ import { join } from 'node:path';
 import { AppModule } from '../../src/app.module';
 import { getFreePort } from '../util/get-free-port';
 import { wrapClientTimeouts } from '../util/wrap-client-timeouts';
-import { StreamsContractBackend } from './contract-test-context';
+import { ScavengeCapableBackend } from './contract-test-context';
 
-export async function setupAdapterBackend(): Promise<StreamsContractBackend> {
+export type AdapterBackend = ScavengeCapableBackend;
+
+export async function setupAdapterBackend(): Promise<AdapterBackend> {
   let app: INestMicroservice;
   let client: KurrentDBClient;
+  let operationsClient: IOperationsClient;
   let grpcPort = await getFreePort();
   const originalPostgresUrl = process.env.POSTGRES_URL;
   const pgContainer: StartedPostgreSqlContainer = await new PostgreSqlContainer(
@@ -34,10 +46,12 @@ export async function setupAdapterBackend(): Promise<StreamsContractBackend> {
       transport: Transport.GRPC,
       options: {
         package: [
+          'event_store.client.operations',
           'event_store.client.streams',
           'event_store.client.server_features',
         ],
         protoPath: [
+          join(__dirname, '../../proto/Grpc/operations.proto'),
           join(__dirname, '../../proto/Grpc/streams.proto'),
           join(__dirname, '../../proto/Grpc/serverfeatures.proto'),
         ],
@@ -51,6 +65,10 @@ export async function setupAdapterBackend(): Promise<StreamsContractBackend> {
     await app.listen();
     client = wrapClientTimeouts(
       KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${grpcPort}?tls=false`,
+    );
+    operationsClient = new OperationsClient(
+      `127.0.0.1:${grpcPort}`,
+      credentials.createInsecure(),
     );
   }
 
@@ -77,5 +95,45 @@ export async function setupAdapterBackend(): Promise<StreamsContractBackend> {
         process.env.POSTGRES_URL = originalPostgresUrl;
       }
     },
+    startScavenge: async () => {
+      const request = createStartScavengeRequest();
+
+      const response = await unaryCall<ScavengeResp>((callback) => {
+        operationsClient.startScavenge(request, callback);
+      });
+
+      return {
+        scavengeId: response.getScavengeId(),
+        scavengeResult: response.getScavengeResult(),
+      };
+    },
   };
+}
+
+function createStartScavengeRequest(): StartScavengeReq {
+  const options = new StartScavengeReq.Options();
+  options.setThreadCount(1);
+  options.setStartFromChunk(0);
+
+  const request = new StartScavengeReq();
+  request.setOptions(options);
+
+  return request;
+}
+
+function unaryCall<TResponse>(
+  invoke: (
+    callback: (error: Error | null, response: TResponse) => void,
+  ) => void,
+): Promise<TResponse> {
+  return new Promise<TResponse>((resolve, reject) => {
+    invoke((error, response) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve(response);
+    });
+  });
 }
