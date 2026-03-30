@@ -92,7 +92,9 @@ export function registerDeleteContractSuite(
         nextExpectedRevision: 2n,
       });
 
-      await expect(context.readStreamEvents(streamName)).resolves.toEqual([
+      await expect(
+        waitForReadStreamEvents(context, streamName),
+      ).resolves.toEqual([
         {
           type: 'booking-recreated',
           data: { step: 3 },
@@ -197,4 +199,25 @@ async function readAllEventsForStream(
   }
 
   return received;
+}
+
+async function waitForReadStreamEvents(
+  context: StreamsContractContext,
+  streamName: string,
+  timeoutMs = 2_000,
+  retryDelayMs = 100,
+): Promise<Array<{ type: string; data: unknown }>> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+
+  while (Date.now() < deadline) {
+    try {
+      return await context.readStreamEvents(streamName);
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }

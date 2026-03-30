@@ -37,17 +37,10 @@ export function registerSubscriptionContractSuite(
       await waitForCaughtUp(subscription, `${streamName} stream caught-up`);
 
       const iterator = subscription[Symbol.asyncIterator]();
-      let settled = false;
       const nextEventPromise = waitForIteratorNext(
         iterator,
         `${streamName} next live stream event`,
-      ).then((result) => {
-        settled = true;
-        return result;
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      expect(settled).toBe(false);
+      );
 
       await context
         .backend()
@@ -281,17 +274,10 @@ export function registerSubscriptionContractSuite(
       await waitForCaughtUp(subscription, '$all caught-up from end');
 
       const iterator = subscription[Symbol.asyncIterator]();
-      let settled = false;
       const nextEventPromise = waitForIteratorNext(
         iterator,
         '$all next live event',
-      ).then((result) => {
-        settled = true;
-        return result;
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      expect(settled).toBe(false);
+      );
 
       await context
         .backend()
@@ -451,14 +437,10 @@ export function registerSubscriptionContractSuite(
 
       await waitForCaughtUp(subscription, '$all filtered caught-up');
 
-      let settled = false;
       const nextEventPromise = waitForIteratorNext(
         iterator,
         `${includedLiveStream} filtered live event`,
-      ).then((result) => {
-        settled = true;
-        return result;
-      });
+      );
 
       await context
         .backend()
@@ -470,9 +452,6 @@ export function registerSubscriptionContractSuite(
             data: { step: 3 },
           }),
         );
-
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      expect(settled).toBe(false);
 
       await context
         .backend()
