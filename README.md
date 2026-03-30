@@ -254,6 +254,7 @@ npm run playground:append-read
 npm run playground:filtered-read
 npm run playground:stream-metadata
 npm run lint
+npm run lint:fix
 npm run test
 npm run e2e
 npm run e2e:dev
