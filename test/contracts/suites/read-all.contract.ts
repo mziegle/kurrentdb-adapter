@@ -3,6 +3,7 @@ import {
   END,
   FORWARDS,
   START,
+  eventTypeFilter,
   streamNameFilter,
   jsonEvent,
 } from '@kurrent/kurrentdb-client';
@@ -280,6 +281,61 @@ export function registerReadAllContractSuite(
         filteredEvents.some((event) => event.streamId === excludedStream),
       ).toBe(false);
       expect(filteredEvents).toHaveLength(2);
+    });
+
+    it('filters $all reads by event type', async () => {
+      const firstStreamName = context.createStreamName(
+        'read-all-event-type-first',
+      );
+      const secondStreamName = context.createStreamName(
+        'read-all-event-type-second',
+      );
+      const uniqueSuffix = context.createStreamName('event-type');
+      const includedEventType = `booking-confirmed-${uniqueSuffix}`;
+      const excludedEventType = `booking-created-${uniqueSuffix}`;
+
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          firstStreamName,
+          jsonEvent({
+            type: excludedEventType,
+            data: { step: 1 },
+          }),
+        );
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          secondStreamName,
+          jsonEvent({
+            type: includedEventType,
+            data: { step: 2 },
+          }),
+        );
+
+      const filteredEvents = await readAllMatchingEvents(
+        context,
+        eventTypeFilter({
+          prefixes: [includedEventType],
+        }),
+      );
+
+      expect(filteredEvents).toEqual([
+        expect.objectContaining({
+          streamId: secondStreamName,
+          type: includedEventType,
+          data: { step: 2 },
+        }),
+      ]);
+      expect(
+        filteredEvents.some(
+          (event) =>
+            event.streamId === firstStreamName &&
+            event.type === excludedEventType,
+        ),
+      ).toBe(false);
     });
   });
 }
