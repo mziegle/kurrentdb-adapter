@@ -1,116 +1,51 @@
 # kurrentdb-adapter
 
-`kurrentdb-adapter` is a NestJS gRPC service that exposes the EventStore/KurrentDB `Streams` protobuf
-contract and persists stream events in PostgreSQL.
+`kurrentdb-adapter` is a PostgreSQL-backed gRPC adapter for the KurrentDB/EventStore `Streams` API.
 
-It is still a partial adapter, not a full KurrentDB-compatible implementation.
+It is intended for users who want to point the official KurrentDB client at this service and work with a compatible subset of stream operations without running a full KurrentDB node.
 
-Retention and scavenging behavior are documented in
-[docs/scavenging.md](c:\Users\micha\Repos\kurrentdb-adapter\docs\scavenging.md).
+Development and contributor information lives in [CONTRIBUTING.md](c:\Users\micha\Repos\kurrentdb-adapter\CONTRIBUTING.md).
 
-## What It Does
+## What It Supports
 
-- Boots a NestJS microservice over gRPC
-- Uses the `event_store.client.streams` protobuf package
-- Loads the service definition from `proto/streams.proto`
-- Generates TypeScript interfaces from protobuf files with `ts-proto`
-- Stores appended events in PostgreSQL
-- Reads persisted stream events back over gRPC
-- Applies stream metadata retention rules such as `$maxCount`, `$maxAge`, and `$tb`
-- Supports scavenging of retention-hidden records
-- Exposes a partial implementation of the `Streams` service
-
-## Current Status
-
-Implemented:
-
-- `Read`
-  Reads persisted events for a single stream from PostgreSQL, including forward and backward reads, revision-based reads, and `maxCount` limits.
-- `ReadAll`
-  Reads the global event stream in both directions, supports position-based reads, `maxCount`, and stream-name prefix filters.
 - `Append`
-  Persists appended events transactionally in PostgreSQL and returns the resulting revision/position.
 - `BatchAppend`
-  Accepts chunked appends from the official client and preserves expected-version behavior across batched requests.
-- Stream metadata retention
-  Supports metadata-driven visibility rules such as `$maxCount`, `$maxAge`, and `$tb`.
-- Stream and `$all` subscriptions
-  Supports catch-up and live subscriptions, including filtered `$all` subscriptions by stream-name prefix.
+- `Read`
+- `ReadAll`
+- stream metadata retention with `$maxCount`, `$maxAge`, and `$tb`
+- stream subscriptions
+- `$all` subscriptions
 - `Delete`
-  Deletes a stream with expected-revision checks.
 - `Tombstone`
-  Permanently tombstones a stream and prevents future appends, reads, and deletes.
-- `StartScavenge` / `StopScavenge`
-  Exposes scavenging operations and physically removes records that are already hidden by retention rules.
+- scavenging through the partial `Operations` service
 
-Unsupported read and subscription modes are documented below and should be treated as unavailable.
+## Behavior Notes
 
-## Retention And Scavenging
+- The adapter persists events in PostgreSQL.
+- It is compatible with the official `@kurrent/kurrentdb-client` for the currently supported surface.
+- Retention rules affect stream reads immediately, but hidden records can remain visible in `$all` until scavenging runs.
+- The adapter follows the KurrentDB rule that truncation metadata alone does not scavenge a stream down to absolute emptiness.
 
-The adapter now follows the same broad retention model that KurrentDB uses:
+More scavenging detail is documented in [docs/scavenging.md](c:\Users\micha\Repos\kurrentdb-adapter\docs\scavenging.md).
 
-- `$tb`, `$maxCount`, and `$maxAge` affect stream reads immediately
-- those hidden events are still present in storage before scavenging
-- before scavenging they may still be visible through `$all`
-- scavenging is the step that physically removes those records
+## Limitations
 
-One important compatibility detail is that KurrentDB does not scavenge away the
-last event in a stream purely because of truncation metadata. The adapter keeps
-that rule as well.
+- This is a partial adapter, not a full KurrentDB replacement.
+- Stream positions are backed by a simple PostgreSQL global sequence, not full KurrentDB position semantics.
+- `Append` wrong-expected-version failures are returned as `AppendResp.wrongExpectedVersion` because that is what the Kurrent client expects.
+- Filtering is supported on `$all` reads and `$all` subscriptions, not direct named-stream reads or subscriptions.
+- Backwards subscriptions are not supported.
+- Requests that are neither named-stream operations nor `$all` operations are not supported.
 
-For the full notes and source references, see
-[docs/scavenging.md](c:\Users\micha\Repos\kurrentdb-adapter\docs\scavenging.md).
+## Configuration
 
-## Stack
-
-- Node.js
-- TypeScript
-- NestJS microservices
-- gRPC
-- Protocol Buffers
-- PostgreSQL
-- `pg`
-- `ts-proto`
-
-## Project Layout
-
-```text
-src/
-  main.ts
-  app.module.ts
-  streams.controller.ts
-  interfaces/
-
-proto/
-
-test/
-  contracts/
-  streams.e2e-spec.ts
-```
-
-## Getting Started
-
-### Prerequisites
-
-- Node.js 20+ recommended
-- npm
-- Docker Desktop or another supported container runtime for e2e tests
-
-### Install
-
-```bash
-npm install
-```
-
-### Configure PostgreSQL
-
-Use either `POSTGRES_URL` or the individual connection variables:
+Use either `POSTGRES_URL`:
 
 ```bash
 POSTGRES_URL=postgres://postgres:postgres@localhost:5432/kurrentdb_adapter
 ```
 
-or
+Or the individual PostgreSQL settings:
 
 ```bash
 POSTGRES_HOST=localhost
@@ -120,150 +55,55 @@ POSTGRES_USER=postgres
 POSTGRES_PASSWORD=postgres
 ```
 
-The gRPC listener defaults to `0.0.0.0:2113`. Override it with:
+The external listener defaults to:
 
 ```bash
 GRPC_URL=0.0.0.0:2113
 ```
 
-To help debug non-gRPC clients such as Navigator, the adapter now starts the
-actual Nest gRPC server on an internal loopback port and places a lightweight
-TCP probe proxy on `GRPC_URL`. Override the internal target with:
+The adapter also starts an internal Nest gRPC server, which defaults to:
 
 ```bash
 INTERNAL_GRPC_URL=127.0.0.1:2213
 ```
 
-The probe proxy logs the first bytes of each incoming connection and labels the
-traffic as `http1`, `http2-prior-knowledge`, or `unknown`.
+The external listener acts as a lightweight TCP probe proxy in front of that internal gRPC server. This helps identify clients that connect with the wrong protocol and logs the first bytes of each incoming connection.
 
-### Start PostgreSQL for local development
+## Running The Adapter
 
-This repo includes a local Postgres stack and a real KurrentDB instance in [docker-compose.yml](c:\Users\micha\Repos\kurrentdb-adapter\docker-compose.yml).
-
-Bring the database up with:
+Install dependencies:
 
 ```bash
-npm run db:up
+npm install
 ```
 
-Stop it with:
-
-```bash
-npm run db:down
-```
-
-Bring up the local KurrentDB instance on `127.0.0.1:2114` with:
-
-```bash
-npm run kurrentdb:up
-```
-
-Bring up both Postgres and KurrentDB with:
-
-```bash
-npm run dev:up
-```
-
-Stop the whole local environment with:
-
-```bash
-npm run dev:down
-```
-
-### Start in development
+Run in development:
 
 ```bash
 npm run start:dev
 ```
 
-If you want one command that starts Postgres and KurrentDB first and then launches the Nest app in watch mode, use:
-
-```bash
-npm run start:dev:env
-```
-
-### Playground
-
-There is also a small `playground/` folder for experimenting against a running adapter.
-
-By default the scripts connect to:
-
-```bash
-kurrentdb://127.0.0.1:2113?tls=false
-```
-
-Override that with:
-
-```bash
-KURRENTDB_CONNECTION_STRING=kurrentdb://127.0.0.1:2113?tls=false
-```
-
-To point a playground script at the local real KurrentDB instance instead of the adapter, use:
-
-```bash
-KURRENTDB_CONNECTION_STRING=kurrentdb://127.0.0.1:2114?tls=false
-```
-
-Available playground scripts:
-
-```bash
-npm run playground:append-read
-npm run playground:filtered-read
-npm run playground:stream-metadata
-```
-
-### Build
+Run the compiled app:
 
 ```bash
 npm run build
-```
-
-### Run compiled app
-
-```bash
 npm run start:prod
 ```
 
-## Protobuf Generation
+## Client Compatibility
 
-The protobuf source files live in `proto/`. Generated TypeScript interfaces are written to `src/interfaces`.
+The adapter is designed to be used through the official KurrentDB client:
 
-Regenerate them with:
+```ts
+import { KurrentDBClient } from '@kurrent/kurrentdb-client';
 
-```bash
-npm run generate
+const client =
+  KurrentDBClient.connectionString`kurrentdb://127.0.0.1:2113?tls=false`;
 ```
 
-## Scripts
+## Service Surface
 
-```bash
-npm run generate
-npm run build
-npm run start
-npm run start:dev
-npm run start:dev:env
-npm run start:debug
-npm run start:prod
-npm run db:up
-npm run db:down
-npm run kurrentdb:up
-npm run dev:up
-npm run dev:down
-npm run playground:append-read
-npm run playground:filtered-read
-npm run playground:stream-metadata
-npm run lint
-npm run lint:fix
-npm run test
-npm run e2e
-npm run e2e:dev
-npm run test:cov
-```
-
-## Service Contract
-
-The adapter exposes the `Streams` gRPC service:
+The adapter exposes the `Streams` service with support for:
 
 - `Read(ReadReq) returns (stream ReadResp)`
 - `Append(stream AppendReq) returns (AppendResp)`
@@ -271,59 +111,4 @@ The adapter exposes the `Streams` gRPC service:
 - `Tombstone(TombstoneReq) returns (TombstoneResp)`
 - `BatchAppend(stream BatchAppendReq) returns (stream BatchAppendResp)`
 
-It also exposes a partial `Operations` service including scavenging endpoints.
-
-## Testing
-
-Contract coverage lives in `test/contracts/streams-contract-suite.ts` and is exercised in two modes. `npm run e2e:dev` starts PostgreSQL with Testcontainers and boots the current app directly in-process. `npm run e2e` runs the suite twice: first against the locally built adapter container image, and then against a real KurrentDB target. Build the adapter image first with `npm run container:build`.
-
-The shared contract tests currently cover:
-
-- single-event append/read
-- stale expected revision rejection on append
-- `NO_STREAM` append behavior
-- `STREAM_EXISTS` append behavior
-- `BatchAppend`
-- empty append behavior on missing and existing streams
-- missing stream reads
-- multi-event append ordering
-- backward reads
-- reads from a specific revision
-- explicit revision `0` handling
-- `maxCount` slicing
-- `$all` reads in both directions
-- `$all` filtering by stream name prefix
-- stream metadata retention behavior
-- stream and `$all` subscriptions
-- persistence across app restart on both the adapter and the KurrentDB targets
-- `Delete`
-- `Tombstone`
-- scavenging behavior against both the adapter and real KurrentDB
-
-Run them with:
-
-```bash
-npm run container:build
-npm run e2e -- --runInBand
-npm run e2e:dev -- --runInBand
-```
-
-`npm run e2e` uses the local `kurrentdb-adapter:local` image for the adapter pass. Its KurrentDB pass uses `KURRENTDB_TEST_CONNECTION_STRING` when provided. Otherwise it starts `docker.kurrent.io/kurrent-latest/kurrentdb:latest` in Testcontainers and includes restart assertions against that managed container.
-
-## Limitations
-
-- Stream positions are backed by a simple Postgres global sequence, not full KurrentDB semantics.
-- `Append` wrong-expected-version is mapped with an `AppendResp.wrongExpectedVersion` payload because that is what the Kurrent client expects.
-- Unsupported read and subscription modes currently include:
-- filtering on named-stream reads or named-stream subscriptions; filters are only supported on `$all`
-- read requests that are neither a named-stream read nor an `$all` read
-- backwards subscriptions
-- subscription requests that are neither a named-stream subscription nor an `$all` subscription
-- This matches the current real KurrentDB gRPC `Streams.Read` behavior: filtering is available for `$all` reads and `$all` subscriptions, not direct named-stream reads or subscriptions.
-- Restart assertions for the KurrentDB pass are skipped when `KURRENTDB_TEST_CONNECTION_STRING` points to an external instance because the suite does not control that process lifecycle.
-- The adapter is still only partially compatible with KurrentDB outside the currently tested contract surface.
-
-## Recommended Next Steps
-
-- either implement or explicitly document the remaining unsupported read/subscription modes
-- expand the contract suite as new RPCs are added
+It also exposes a partial `Operations` service for scavenging endpoints.
