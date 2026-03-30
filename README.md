@@ -86,7 +86,6 @@ proto/
 test/
   contracts/
   streams.e2e-spec.ts
-  kurrentdb.e2e-spec.ts
 ```
 
 ## Getting Started
@@ -256,7 +255,8 @@ npm run playground:filtered-read
 npm run playground:stream-metadata
 npm run lint
 npm run test
-npm run test:e2e
+npm run e2e
+npm run e2e:dev
 npm run test:cov
 ```
 
@@ -274,7 +274,7 @@ It also exposes a partial `Operations` service including scavenging endpoints.
 
 ## Testing
 
-Contract coverage lives in `test/contracts/streams-contract-suite.ts` and is exercised by backend-specific runners. The adapter runner in `test/streams.e2e-spec.ts` starts PostgreSQL with Testcontainers and boots the Nest gRPC service. The KurrentDB runner in `test/kurrentdb.e2e-spec.ts` runs the same client-level assertions against a real KurrentDB target.
+Contract coverage lives in `test/contracts/streams-contract-suite.ts` and is exercised in two modes. `npm run e2e:dev` starts PostgreSQL with Testcontainers and boots the current app directly in-process. `npm run e2e` runs the suite twice: first against the locally built adapter container image, and then against a real KurrentDB target. Build the adapter image first with `npm run container:build`.
 
 The shared contract tests currently cover:
 
@@ -294,7 +294,7 @@ The shared contract tests currently cover:
 - `$all` filtering by stream name prefix
 - stream metadata retention behavior
 - stream and `$all` subscriptions
-- persistence across app restart on both the adapter backend and the default managed KurrentDB backend
+- persistence across app restart on both the adapter and the KurrentDB targets
 - `Delete`
 - `Tombstone`
 - scavenging behavior against both the adapter and real KurrentDB
@@ -302,12 +302,12 @@ The shared contract tests currently cover:
 Run them with:
 
 ```bash
-npm run test:e2e:adapter -- --runInBand
-npm run test:e2e:kurrentdb -- --runInBand
-npm run test:e2e:contracts -- --runInBand
+npm run container:build
+npm run e2e -- --runInBand
+npm run e2e:dev -- --runInBand
 ```
 
-`test:e2e:kurrentdb` uses `KURRENTDB_TEST_CONNECTION_STRING` when provided. Otherwise it starts `docker.kurrent.io/kurrent-latest/kurrentdb:latest` in Testcontainers and includes restart-persistence assertions against that managed container. When `KURRENTDB_TEST_CONNECTION_STRING` points to an external instance, restart assertions are skipped because the suite does not control that process lifecycle.
+`npm run e2e` uses the local `kurrentdb-adapter:local` image for the adapter pass. Its KurrentDB pass uses `KURRENTDB_TEST_CONNECTION_STRING` when provided. Otherwise it starts `docker.kurrent.io/kurrent-latest/kurrentdb:latest` in Testcontainers and includes restart assertions against that managed container.
 
 ## Limitations
 
@@ -319,7 +319,7 @@ npm run test:e2e:contracts -- --runInBand
 - backwards subscriptions
 - subscription requests that are neither a named-stream subscription nor an `$all` subscription
 - This matches the current real KurrentDB gRPC `Streams.Read` behavior: filtering is available for `$all` reads and `$all` subscriptions, not direct named-stream reads or subscriptions.
-- Restart-persistence parity with real KurrentDB depends on the suite managing the container lifecycle directly; external KurrentDB targets provided through `KURRENTDB_TEST_CONNECTION_STRING` still skip restart assertions.
+- Restart assertions for the KurrentDB pass are skipped when `KURRENTDB_TEST_CONNECTION_STRING` points to an external instance because the suite does not control that process lifecycle.
 - The adapter is still only partially compatible with KurrentDB outside the currently tested contract surface.
 
 ## Recommended Next Steps
