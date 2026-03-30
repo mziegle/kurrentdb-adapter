@@ -1,0 +1,10 @@
+node_modules
+dist
+coverage
+.git
+.github
+benchmark
+playground
+test
+docs
+npm-debug.log
