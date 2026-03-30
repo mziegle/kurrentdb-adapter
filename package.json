@@ -8,6 +8,8 @@
   "scripts": {
     "generate": "protoc --proto_path=./proto/Grpc --ts_proto_out=./src/interfaces ./proto/Grpc/*.proto --ts_proto_opt=nestJs=true",
     "build": "nest build",
+    "container:build": "docker build -t kurrentdb-adapter:local .",
+    "container:run": "docker run --rm -p 2113:2113 kurrentdb-adapter:local",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",
