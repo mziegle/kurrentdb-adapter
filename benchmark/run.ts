@@ -133,7 +133,11 @@ function formatNumber(value: number, digits = 2): string {
   });
 }
 
-function uniqueStreamName(tag: string, scenarioId: string, streamIndex: number): string {
+function uniqueStreamName(
+  tag: string,
+  scenarioId: string,
+  streamIndex: number,
+): string {
   return `benchmark-${tag}-${scenarioId}-${Date.now()}-${streamIndex}`;
 }
 
@@ -339,7 +343,10 @@ async function runReadScenario(
       0,
     ),
     latenciesMs: workerResults.flatMap((result) => result.latenciesMs),
-    eventCount: workerResults.reduce((total, result) => total + result.eventCount, 0),
+    eventCount: workerResults.reduce(
+      (total, result) => total + result.eventCount,
+      0,
+    ),
     elapsedMs,
   };
 }
@@ -393,7 +400,10 @@ async function runMixedScenario(
       0,
     ),
     latenciesMs: workerResults.flatMap((result) => result.latenciesMs),
-    eventCount: workerResults.reduce((total, result) => total + result.eventCount, 0),
+    eventCount: workerResults.reduce(
+      (total, result) => total + result.eventCount,
+      0,
+    ),
     elapsedMs,
   };
 }
@@ -412,7 +422,12 @@ async function runScenario(
 
   try {
     if (scenario.kind === 'read' || scenario.kind === 'mixed') {
-      await prefillStreams(client, streamNames, payload, scenario.eventsPerStream);
+      await prefillStreams(
+        client,
+        streamNames,
+        payload,
+        scenario.eventsPerStream,
+      );
     }
 
     await warmup(client, scenario, streamNames, payload);
@@ -437,7 +452,8 @@ async function runScenario(
       kind: scenario.kind,
       elapsedMs: rawResult.elapsedMs,
       operationCount: rawResult.operationCount,
-      operationsPerSecond: rawResult.operationCount / (rawResult.elapsedMs / 1_000),
+      operationsPerSecond:
+        rawResult.operationCount / (rawResult.elapsedMs / 1_000),
       eventCount: rawResult.eventCount,
       eventsPerSecond: rawResult.eventCount / (rawResult.elapsedMs / 1_000),
       avgLatencyMs,
@@ -536,7 +552,9 @@ async function main(): Promise<void> {
     console.log(`Description: ${scenario.description}`);
 
     for (const target of DEFAULT_TARGETS) {
-      console.log(`Running target: ${target.name} (${target.connectionString})`);
+      console.log(
+        `Running target: ${target.name} (${target.connectionString})`,
+      );
       const result = await runScenario(target, scenario);
       results.push(result);
 
