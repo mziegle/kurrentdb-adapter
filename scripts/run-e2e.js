@@ -1,6 +1,16 @@
 const { spawnSync } = require('node:child_process');
 
 const mode = process.argv[2];
+const npmCommand =
+  process.platform === 'win32'
+    ? {
+        command: process.env.ComSpec || 'cmd.exe',
+        args: ['/d', '/s', '/c', 'npm run container:build'],
+      }
+    : {
+        command: 'npm',
+        args: ['run', 'container:build'],
+      };
 
 if (!mode) {
   console.error('Usage: node scripts/run-e2e.js <e2e|dev> [jest args...]');
@@ -13,10 +23,9 @@ const backends = mode === 'e2e' ? ['container', 'kurrentdb'] : ['dev'];
 
 for (const backend of backends) {
   if (backend === 'container') {
-    const buildResult = spawnSync('npm', ['run', 'container:build'], {
+    const buildResult = spawnSync(npmCommand.command, npmCommand.args, {
       stdio: 'inherit',
       env: process.env,
-      shell: process.platform === 'win32',
     });
 
     if ((buildResult.status ?? 1) !== 0) {
