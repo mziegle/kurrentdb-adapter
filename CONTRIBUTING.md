@@ -8,7 +8,7 @@ User-facing adapter information lives in [README.md](c:\Users\micha\Repos\kurren
 
 ### Prerequisites
 
-- Node.js 20+ recommended
+- Node.js 24
 - npm
 - Docker Desktop or another supported container runtime for Testcontainers-based e2e runs
 

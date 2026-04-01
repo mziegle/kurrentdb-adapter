@@ -71,6 +71,8 @@ The external listener acts as a lightweight TCP probe proxy in front of that int
 
 ## Running The Adapter
 
+This repo targets Node.js 24.
+
 Install dependencies:
 
 ```bash
