@@ -22,6 +22,11 @@ const GRPC_DEFAULT_PORT = 2113;
 const STUB_INSTANCE_ID = randomUUID();
 const STUB_EPOCH_ID = randomUUID();
 const STUB_START_TIME = new Date().toISOString();
+const STUB_SERVER_VERSION =
+  process.env.STUB_SERVER_VERSION ?? '26.0.2.3257-None';
+const STUB_INTERNAL_TCP_PORT = Number(
+  process.env.STUB_INTERNAL_TCP_PORT ?? '1112',
+);
 
 export function getNodeAddress(): string {
   const advertisedHost = process.env.ADVERTISE_HOST;
@@ -189,17 +194,17 @@ export function createStubUserDetails(request: DetailsReq): DetailsResp {
 
 export function createInfoResponseBody(): string {
   return JSON.stringify({
-    dbVersion: '24.0.0',
-    esVersion: '24.0.0',
+    dbVersion: STUB_SERVER_VERSION,
+    esVersion: STUB_SERVER_VERSION,
     state: 'leader',
     features: {
       projections: false,
-      userManagement: true,
-      atomPub: false,
+      userManagement: false,
+      atomPub: true,
     },
     authentication: {
       type: 'insecure',
-      properties: {},
+      properties: [],
     },
   });
 }
@@ -215,7 +220,7 @@ export function createHttpGossipResponseBody(): string {
         state: 'Leader',
         isAlive: true,
         internalTcpIp: getNodeAddress(),
-        internalTcpPort: 0,
+        internalTcpPort: STUB_INTERNAL_TCP_PORT,
         internalSecureTcpPort: 0,
         externalTcpIp: getNodeAddress(),
         externalTcpPort: 0,
@@ -224,9 +229,6 @@ export function createHttpGossipResponseBody(): string {
         internalHttpEndPointPort: getNodePort(),
         httpEndPointIp: getNodeAddress(),
         httpEndPointPort: getNodePort(),
-        advertiseHostToClientAs: getNodeAddress(),
-        advertiseHttpPortToClientAs: getNodePort(),
-        advertiseTcpPortToClientAs: 0,
         lastCommitPosition: 0,
         writerCheckpoint: 0,
         chaserCheckpoint: 0,
@@ -235,7 +237,7 @@ export function createHttpGossipResponseBody(): string {
         epochId: STUB_EPOCH_ID,
         nodePriority: 0,
         isReadOnlyReplica: false,
-        esVersion: '24.0.0',
+        esVersion: STUB_SERVER_VERSION,
       },
     ],
   });
@@ -258,12 +260,12 @@ export function createHttpStatsResponseBody(): string {
       id: process.pid,
       mem: process.memoryUsage().rss,
       cpu: 0,
-      cpuScaled: 0,
       threadsCount: 0,
       contentionsRate: 0,
       thrownExceptionsRate: 0,
       gc: {
         allocationSpeed: 0,
+        fragmentation: 0,
         gen0ItemsCount: 0,
         gen0Size: 0,
         gen1ItemsCount: 0,
@@ -285,7 +287,7 @@ export function createHttpStatsResponseBody(): string {
         receivingSpeed: 0,
         sendingSpeed: 0,
         inSend: 0,
-        measureTime: 0,
+        measureTime: '00:00:00.0000000',
         pendingReceived: 0,
         pendingSend: 0,
         receivedBytesSinceLastRun: 0,
@@ -316,27 +318,76 @@ export function createHttpStatsResponseBody(): string {
       checksum: 0,
       checksumNonFlushed: 0,
       queue: {
-        mainQueue: {
-          queueName: 'MainQueue',
-          groupName: '',
-          avgItemsPerSecond: 0,
-          avgProcessingTime: 0,
+        'index Committer': createQueueStats('Index Committer', {
           currentIdleTime: '0:00:00:00.0000000',
-          currentItemProcessingTime: null,
-          idleTimePercent: 100,
-          length: 0,
-          lengthCurrentTryPeak: 0,
-          lengthLifetimePeak: 0,
-          totalItemsProcessed: 0,
-          inProgressMessage: '',
-          lastProcessedMessage: '',
+          lastProcessedMessage: 'CommitChased',
+        }),
+        mainQueue: createQueueStats('MainQueue', {
+          currentIdleTime: '0:00:00:00.0000000',
+          lastProcessedMessage: 'Schedule',
+        }),
+        monitoringQueue: createQueueStats('MonitoringQueue', {
+          currentIdleTime: null,
+          currentItemProcessingTime: '0:00:00:00.0000000',
+          inProgressMessage: 'GetFreshStats',
+          lastProcessedMessage: 'GetFreshStats',
+        }),
+        persistentSubscriptions: createQueueStats('PersistentSubscriptions', {
+          currentIdleTime: '0:00:00:00.0000000',
+          lastProcessedMessage: 'GetAllPersistentSubscriptionStats',
+        }),
+        redaction: createQueueStats('Redaction'),
+        'storage Chaser': createQueueStats('Storage Chaser', {
+          currentIdleTime: '0:00:00:00.0000000',
+          lastProcessedMessage: 'ChaserCheckpointFlush',
+        }),
+        storageReaderQueue: createQueueStats('StorageReaderQueue', {
+          currentIdleTime: '0:00:00:00.0000000',
+        }),
+        storageWriterQueue: createQueueStats('StorageWriterQueue', {
+          currentIdleTime: '0:00:00:00.0000000',
+          lastProcessedMessage: 'WritePrepares',
+        }),
+        subscriptions: createQueueStats('Subscriptions', {
+          currentIdleTime: '0:00:00:00.0000000',
+          lastProcessedMessage: 'CheckPollTimeout',
+        }),
+        threadPool: createQueueStats('ThreadPool'),
+        timer: createQueueStats('Timer', {
+          currentIdleTime: '0:00:00:00.0000000',
+          lastProcessedMessage: 'ExecuteScheduledTasks',
+        }),
+      },
+      cache: {
+        streamInfo: {
+          lastEventNumber: createCacheStats('LastEventNumber', 0, 100000),
+          metadata: createCacheStats('Metadata', 0, 100000),
+          ...createCacheStats('StreamInfo', 0, 200000),
         },
+        ...createCacheStats('cache', 0, 200000),
+      },
+      writer: {
+        lastFlushSize: 0,
+        lastFlushDelayMs: 0,
+        meanFlushSize: 0,
+        meanFlushDelayMs: 0,
+        maxFlushSize: 0,
+        maxFlushDelayMs: 0,
+        queuedFlushMessages: 0,
+      },
+      readIndex: {
+        cachedRecord: 0,
+        notCachedRecord: 0,
+        cachedStreamInfo: 0,
+        notCachedStreamInfo: 0,
+        cachedTransInfo: 0,
+        notCachedTransInfo: 0,
       },
       writerCheckpoint: 0,
       chaserCheckpoint: 0,
       epochPosition: 0,
       epochNumber: 0,
-      runTimeVersion: '24.0.0',
+      runTimeVersion: STUB_SERVER_VERSION,
       state: 'Leader',
     },
   });
@@ -348,4 +399,45 @@ function getDriveName(): string {
   }
 
   return process.cwd();
+}
+
+function createQueueStats(
+  queueName: string,
+  overrides?: Partial<{
+    currentIdleTime: string | null;
+    currentItemProcessingTime: string | null;
+    inProgressMessage: string;
+    lastProcessedMessage: string;
+  }>,
+) {
+  return {
+    queueName,
+    groupName: '',
+    avgItemsPerSecond: 0,
+    avgProcessingTime: 0,
+    currentIdleTime: overrides?.currentIdleTime ?? null,
+    currentItemProcessingTime: overrides?.currentItemProcessingTime ?? null,
+    idleTimePercent: 100,
+    length: 0,
+    lengthCurrentTryPeak: 0,
+    lengthLifetimePeak: 0,
+    totalItemsProcessed: 0,
+    inProgressMessage: overrides?.inProgressMessage ?? '<none>',
+    lastProcessedMessage: overrides?.lastProcessedMessage ?? '<none>',
+  };
+}
+
+function createCacheStats(
+  name: string,
+  count: number,
+  capacityEntries: number,
+) {
+  return {
+    name,
+    count,
+    sizeEntries: count,
+    capacityEntries,
+    utilizationPercent:
+      capacityEntries > 0 ? (count / capacityEntries) * 100 : 0,
+  };
 }

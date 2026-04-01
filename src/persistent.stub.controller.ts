@@ -31,19 +31,23 @@ import { logHotPath } from './debug-log';
 export class PersistentSubscriptionsStubController implements PersistentSubscriptionsController {
   create(request: CreateReq): CreateResp {
     void request;
-    logHotPath('gRPC PersistentSubscriptions.Create');
+    logHotPath('gRPC PersistentSubscriptions.Create', {
+      detail: this.summarizeCreateOrUpdateRequest(request.options?.groupName),
+    });
     return {};
   }
 
   update(request: UpdateReq): UpdateResp {
-    void request;
-    logHotPath('gRPC PersistentSubscriptions.Update');
+    logHotPath('gRPC PersistentSubscriptions.Update', {
+      detail: this.summarizeCreateOrUpdateRequest(request.options?.groupName),
+    });
     return {};
   }
 
   delete(request: DeleteReq): DeleteResp {
-    void request;
-    logHotPath('gRPC PersistentSubscriptions.Delete');
+    logHotPath('gRPC PersistentSubscriptions.Delete', {
+      detail: this.summarizeGroupName(request.options?.groupName),
+    });
     return {};
   }
 
@@ -54,7 +58,9 @@ export class PersistentSubscriptionsStubController implements PersistentSubscrip
   }
 
   getInfo(request: GetInfoReq): GetInfoResp {
-    logHotPath('gRPC PersistentSubscriptions.GetInfo');
+    logHotPath('gRPC PersistentSubscriptions.GetInfo', {
+      detail: this.summarizeGetInfoRequest(request),
+    });
     return createPersistentGetInfoResponse(request);
   }
 
@@ -65,8 +71,9 @@ export class PersistentSubscriptionsStubController implements PersistentSubscrip
   }
 
   list(request: ListReq): ListResp {
-    void request;
-    logHotPath('gRPC PersistentSubscriptions.List');
+    logHotPath('gRPC PersistentSubscriptions.List', {
+      detail: this.summarizeListRequest(request),
+    });
     return createPersistentListResponse();
   }
 
@@ -74,5 +81,38 @@ export class PersistentSubscriptionsStubController implements PersistentSubscrip
     void request;
     logHotPath('gRPC PersistentSubscriptions.RestartSubsystem');
     return {};
+  }
+
+  private summarizeCreateOrUpdateRequest(
+    groupName?: string,
+  ): string | undefined {
+    return this.summarizeGroupName(groupName);
+  }
+
+  private summarizeGroupName(groupName?: string): string | undefined {
+    return groupName ? `group=${groupName}` : undefined;
+  }
+
+  private summarizeGetInfoRequest(request: GetInfoReq): string {
+    const groupName = this.summarizeGroupName(request.options?.groupName);
+    const streamName = request.options?.streamIdentifier?.streamName
+      ? Buffer.from(request.options.streamIdentifier.streamName).toString(
+          'utf8',
+        )
+      : '$all';
+    return [groupName, `stream=${streamName}`].filter(Boolean).join(' ');
+  }
+
+  private summarizeListRequest(request: ListReq): string | undefined {
+    if (request.options?.listAllSubscriptions) {
+      return 'scope=all';
+    }
+
+    const streamName = request.options?.listForStream?.stream?.streamName;
+    if (streamName) {
+      return `stream=${Buffer.from(streamName).toString('utf8')}`;
+    }
+
+    return undefined;
   }
 }

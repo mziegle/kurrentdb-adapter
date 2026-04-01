@@ -197,13 +197,18 @@ async function startProbeProxy(
 
 function logIncomingProbe(clientSocket: Socket, chunk: Buffer): void {
   const remoteAddress = `${clientSocket.remoteAddress ?? 'unknown'}:${clientSocket.remotePort ?? 0}`;
-  const requestLine = chunk.subarray(0, 96).toString('utf8');
+  const requestLine = chunk.toString('utf8').split('\r\n', 1)[0] ?? '';
   const knownHttpPath = getKnownHttpPath(requestLine);
 
   if (knownHttpPath) {
     logHotPath(`HTTP ${knownHttpPath}`, {
       detail: `from ${remoteAddress}`,
     });
+    return;
+  }
+
+  if (isHttp1RequestLine(requestLine)) {
+    console.info(`[debug] HTTP unhandled ${requestLine} from ${remoteAddress}`);
     return;
   }
 
@@ -262,6 +267,12 @@ function getKnownHttpPath(requestLine: string): string | undefined {
   return undefined;
 }
 
+function isHttp1RequestLine(requestLine: string): boolean {
+  return /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) .+ HTTP\/1\.[01]$/.test(
+    requestLine,
+  );
+}
+
 function tryHandleHealthProbe(clientSocket: Socket, chunk: Buffer): boolean {
   const requestLine = chunk.subarray(0, 64).toString('utf8');
 
@@ -269,8 +280,13 @@ function tryHandleHealthProbe(clientSocket: Socket, chunk: Buffer): boolean {
     requestLine.startsWith('HEAD /health/live HTTP/1.1') ||
     requestLine.startsWith('GET /health/live HTTP/1.1')
   ) {
-    clientSocket.write(
-      'HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n',
+    writeHttpResponse(
+      clientSocket,
+      'HEAD /health/live',
+      204,
+      'No Content',
+      'text/plain; charset=utf-8',
+      '',
     );
     return true;
   }
@@ -286,15 +302,13 @@ function tryHandleInfoRequest(clientSocket: Socket, chunk: Buffer): boolean {
   }
 
   const body = createInfoResponseBody();
-  clientSocket.write(
-    [
-      'HTTP/1.1 200 OK',
-      'Content-Type: application/json; charset=utf-8',
-      `Content-Length: ${Buffer.byteLength(body, 'utf8')}`,
-      'Connection: keep-alive',
-      '',
-      body,
-    ].join('\r\n'),
+  writeHttpResponse(
+    clientSocket,
+    'GET /info',
+    200,
+    'OK',
+    'application/json; charset=utf-8',
+    body,
   );
   return true;
 }
@@ -307,15 +321,13 @@ function tryHandleGossipRequest(clientSocket: Socket, chunk: Buffer): boolean {
   }
 
   const body = createHttpGossipResponseBody();
-  clientSocket.write(
-    [
-      'HTTP/1.1 200 OK',
-      'Content-Type: application/json; charset=utf-8',
-      `Content-Length: ${Buffer.byteLength(body, 'utf8')}`,
-      'Connection: keep-alive',
-      '',
-      body,
-    ].join('\r\n'),
+  writeHttpResponse(
+    clientSocket,
+    'GET /gossip',
+    200,
+    'OK',
+    'application/json; charset=utf-8',
+    body,
   );
   return true;
 }
@@ -328,15 +340,13 @@ function tryHandleStatsRequest(clientSocket: Socket, chunk: Buffer): boolean {
   }
 
   const body = createHttpStatsResponseBody();
-  clientSocket.write(
-    [
-      'HTTP/1.1 200 OK',
-      'Content-Type: application/json; charset=utf-8',
-      `Content-Length: ${Buffer.byteLength(body, 'utf8')}`,
-      'Connection: keep-alive',
-      '',
-      body,
-    ].join('\r\n'),
+  writeHttpResponse(
+    clientSocket,
+    'GET /stats',
+    200,
+    'OK',
+    'application/json; charset=utf-8',
+    body,
   );
   return true;
 }
@@ -351,17 +361,39 @@ function tryHandlePingRequest(clientSocket: Socket, chunk: Buffer): boolean {
 
   const acceptHeader = getHeaderValue(requestText, 'accept');
   const response = createPingHttpResponse(acceptHeader);
-  clientSocket.write(
-    [
-      'HTTP/1.1 200 OK',
-      `Content-Type: ${response.contentType}`,
-      `Content-Length: ${Buffer.byteLength(response.body, 'utf8')}`,
-      'Connection: keep-alive',
-      '',
-      response.body,
-    ].join('\r\n'),
+  writeHttpResponse(
+    clientSocket,
+    'GET /ping',
+    200,
+    'OK',
+    response.contentType,
+    response.body,
   );
   return true;
+}
+
+function writeHttpResponse(
+  clientSocket: Socket,
+  path: string,
+  statusCode: number,
+  statusText: string,
+  contentType: string,
+  body: string,
+): void {
+  const contentLength = Buffer.byteLength(body, 'utf8');
+  console.info(
+    `[debug] HTTP response ${path} status=${statusCode} bytes=${contentLength}`,
+  );
+  clientSocket.write(
+    [
+      `HTTP/1.1 ${statusCode} ${statusText}`,
+      `Content-Type: ${contentType}`,
+      `Content-Length: ${contentLength}`,
+      'Connection: keep-alive',
+      '',
+      body,
+    ].join('\r\n'),
+  );
 }
 
 function getHeaderValue(

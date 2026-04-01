@@ -17,8 +17,7 @@ const USERS_SERVICE_NAME = 'event_store.client.users.users';
 export class ServerFeaturesController {
   @GrpcMethod('ServerFeatures', 'getSupportedMethods')
   getSupportedMethods(): SupportedMethods {
-    logHotPath('gRPC ServerFeatures.GetSupportedMethods');
-    return {
+    const response = {
       eventStoreServerVersion: '24.0.0',
       methods: [
         this.createSupportedMethod('append', STREAMS_SERVICE_NAME),
@@ -97,6 +96,11 @@ export class ServerFeaturesController {
         ),
       ],
     };
+
+    logHotPath('gRPC ServerFeatures.GetSupportedMethods', {
+      detail: `version=${response.eventStoreServerVersion} methods=${response.methods.length}`,
+    });
+    return response;
   }
 
   private createSupportedMethod(

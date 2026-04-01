@@ -34,6 +34,7 @@ import {
 import { Code } from './interfaces/code';
 import { Any } from './interfaces/google/protobuf/any';
 import { Timestamp } from './interfaces/google/protobuf/timestamp';
+import { createInfoResponseBody } from './stub-utils';
 
 type PersistedEventRow = {
   global_position: string | number;
@@ -114,6 +115,9 @@ export class PostgresEventStoreService
   implements OnModuleInit, OnModuleDestroy
 {
   private static readonly ALL_STREAM_KEY = '$all';
+  private static readonly SERVER_INFO_STREAM = '$server-info';
+  private static readonly STREAMS_STREAM = '$streams';
+  private static readonly SCAVENGES_STREAM = '$scavenges';
   private static readonly SCAVENGE_BATCH_SIZE = 500;
   private readonly pool = new Pool(this.getPoolConfig());
   private readonly streamVersions = new Map<string, number>();
@@ -1066,6 +1070,17 @@ export class PostgresEventStoreService
     streamName: string,
     options: NonNullable<ReadReq['options']>,
   ): Promise<ReadResp[]> {
+    if (streamName === PostgresEventStoreService.SERVER_INFO_STREAM) {
+      return [this.createSyntheticReadResponse(streamName, '$ServerInfo')];
+    }
+
+    if (
+      streamName === PostgresEventStoreService.STREAMS_STREAM ||
+      streamName === PostgresEventStoreService.SCAVENGES_STREAM
+    ) {
+      return this.createExistingEmptyStreamReadResponses(options);
+    }
+
     const streamState = await this.getStreamRetentionPolicy(
       this.pool,
       streamName,
@@ -1182,6 +1197,23 @@ export class PostgresEventStoreService
       `,
       params,
     );
+
+    if (result.rows.length === 0) {
+      console.info(
+        `[debug] ReadAll snapshot empty boundary=${boundary === null ? 'none' : String(boundary)} filter=${
+          options.filter ? 'yes' : 'no'
+        } returning=caughtUp`,
+      );
+      return [
+        {
+          // Emit a terminal frame so clients don't see an entirely empty
+          // response stream when $all is read against an empty database.
+          caughtUp: {
+            timestamp: this.createTimestamp(),
+          },
+        },
+      ];
+    }
 
     return result.rows.map((row) => this.mapRowToReadResponse(row));
   }
@@ -1388,6 +1420,46 @@ export class PostgresEventStoreService
         commitPosition: this.toNumber(row.global_position),
       },
     };
+  }
+
+  private createSyntheticReadResponse(
+    streamName: string,
+    eventType: string,
+  ): ReadResp {
+    return {
+      event: {
+        event: {
+          id: { string: randomUUID() },
+          streamIdentifier: {
+            streamName: Buffer.from(streamName),
+          },
+          streamRevision: 0,
+          preparePosition: 0,
+          commitPosition: 0,
+          metadata: {
+            type: eventType,
+            created: String(Date.now() * 10_000),
+            'content-type': 'application/json',
+          },
+          customMetadata: Buffer.alloc(0),
+          data: Buffer.from(createInfoResponseBody(), 'utf8'),
+        },
+        link: undefined,
+        commitPosition: 0,
+      },
+      // Include a timestamped terminal-ish marker payload via event metadata only;
+      // named stream snapshot reads do not have a dedicated "empty but exists" frame.
+    };
+  }
+
+  private createExistingEmptyStreamReadResponses(
+    options: NonNullable<ReadReq['options']>,
+  ): ReadResp[] {
+    if (this.isBackwardsRead(options.readDirection)) {
+      return [{ lastStreamPosition: 0 }];
+    }
+
+    return [{ firstStreamPosition: 0 }];
   }
 
   private createTimestamp(): Timestamp {
@@ -1902,7 +1974,10 @@ export class PostgresEventStoreService
     }
 
     if (all.position !== undefined) {
-      return this.toNumber(all.position.commitPosition);
+      const commitPosition = this.toNumber(all.position.commitPosition);
+      return this.isBackwardsRead(options.readDirection)
+        ? commitPosition - 1
+        : commitPosition;
     }
 
     if (all.start !== undefined) {

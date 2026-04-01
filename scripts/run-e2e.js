@@ -12,6 +12,18 @@ const jestArgs = process.argv.slice(3);
 const backends = mode === 'e2e' ? ['container', 'kurrentdb'] : ['dev'];
 
 for (const backend of backends) {
+  if (backend === 'container') {
+    const buildResult = spawnSync('npm', ['run', 'container:build'], {
+      stdio: 'inherit',
+      env: process.env,
+      shell: process.platform === 'win32',
+    });
+
+    if ((buildResult.status ?? 1) !== 0) {
+      process.exit(buildResult.status ?? 1);
+    }
+  }
+
   const result = spawnSync(
     process.execPath,
     [

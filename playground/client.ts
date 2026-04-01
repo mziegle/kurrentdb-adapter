@@ -1,6 +1,6 @@
 import { KurrentDBClient } from '@kurrent/kurrentdb-client';
 
-const DEFAULT_CONNECTION_STRING = 'kurrentdb://127.0.0.1:2113?tls=false';
+const DEFAULT_CONNECTION_STRING = '';
 
 export function createPlaygroundClient(
   connectionString = process.env.KURRENTDB_CONNECTION_STRING ??

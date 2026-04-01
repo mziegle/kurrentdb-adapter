@@ -174,6 +174,79 @@ export function registerReadAllContractSuite(
       ]);
     });
 
+    it('treats an explicit backward $all position as exclusive', async () => {
+      const firstStreamName = context.createStreamName(
+        'read-all-backward-exclusive-first',
+      );
+      const secondStreamName = context.createStreamName(
+        'read-all-backward-exclusive-second',
+      );
+
+      await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          firstStreamName,
+          jsonEvent({
+            type: 'booking-created',
+            data: { step: 1 },
+          }),
+        );
+      const secondAppend = await context
+        .backend()
+        .getClient()
+        .appendToStream(
+          secondStreamName,
+          jsonEvent({
+            type: 'booking-confirmed',
+            data: { step: 2 },
+          }),
+        );
+
+      const latestEvent = await context.readAllEvents(BACKWARDS, END, 1);
+      expect(latestEvent).toEqual([
+        expect.objectContaining({
+          streamId: secondStreamName,
+          type: 'booking-confirmed',
+          data: { step: 2 },
+          position: expectPosition(secondAppend.position),
+        }),
+      ]);
+
+      const nextSlice = await context.readAllEvents(
+        BACKWARDS,
+        expectPosition(secondAppend.position),
+        10,
+      );
+
+      const nextSliceSummary = nextSlice.map((event) => ({
+        streamId: event.streamId,
+        type: event.type,
+        data: event.data,
+      }));
+
+      expect(
+        nextSliceSummary.some(
+          (event) =>
+            event.streamId === secondStreamName &&
+            event.type === 'booking-confirmed' &&
+            event.data &&
+            typeof event.data === 'object' &&
+            'step' in event.data &&
+            event.data.step === 2,
+        ),
+      ).toBe(false);
+      expect(nextSliceSummary).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            streamId: firstStreamName,
+            type: 'booking-created',
+            data: { step: 1 },
+          }),
+        ]),
+      );
+    });
+
     it('limits $all reads with maxCount in both directions', async () => {
       const firstStreamName = context.createStreamName('read-all-limit-first');
       const secondStreamName = context.createStreamName(

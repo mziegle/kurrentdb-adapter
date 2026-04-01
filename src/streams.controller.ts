@@ -43,7 +43,12 @@ export class StreamsController {
     call?: ServerWritableStream<ReadReq, ReadResp>,
   ): Observable<ReadResp> {
     logHotPath('gRPC Streams.Read', {
-      detail: summarizeGrpcMetadata(metadata),
+      detail: [
+        summarizeGrpcMetadata(metadata),
+        this.summarizeReadRequest(request),
+      ]
+        .filter(Boolean)
+        .join(' '),
     });
     return new Observable<ReadResp>((subscriber) => {
       let cancelled = false;
@@ -75,6 +80,11 @@ export class StreamsController {
           }
 
           const responses = await this.eventStore.read(request);
+          console.info(
+            `[debug] gRPC Streams.Read resolved ${responses.length} response(s) ${this.summarizeReadResponses(
+              responses,
+            )}`,
+          );
           for (const response of responses) {
             subscriber.next(response);
           }
@@ -92,6 +102,90 @@ export class StreamsController {
         call?.off('cancelled', cancelHandler);
       };
     });
+  }
+
+  private summarizeReadRequest(request: ReadReq): string {
+    const options = request.options;
+    if (!options) {
+      return 'options=missing';
+    }
+
+    if (options.all) {
+      const boundary =
+        options.all.position !== undefined
+          ? `position=${options.all.position.commitPosition}/${options.all.position.preparePosition}`
+          : options.all.start !== undefined
+            ? 'from=start'
+            : options.all.end !== undefined
+              ? 'from=end'
+              : 'from=unset';
+      const mode = options.subscription ? 'subscription' : 'count';
+      const count =
+        options.count !== undefined ? ` count=${String(options.count)}` : '';
+      return `$all ${mode} ${boundary}${count}`;
+    }
+
+    const streamName = request.options?.stream?.streamIdentifier?.streamName;
+    if (streamName) {
+      return `stream=${Buffer.from(streamName).toString('utf8')}`;
+    }
+
+    return 'streamOption=none';
+  }
+
+  private summarizeReadResponses(responses: ReadResp[]): string {
+    if (responses.length === 0) {
+      return 'summary=empty';
+    }
+
+    const parts = responses.map((response) => {
+      if (response.event) {
+        const recordedEvent = response.event.event;
+        const streamName = recordedEvent?.streamIdentifier?.streamName
+          ? Buffer.from(recordedEvent.streamIdentifier.streamName).toString(
+              'utf8',
+            )
+          : 'unknown';
+        const streamRevision =
+          recordedEvent?.streamRevision !== undefined
+            ? String(recordedEvent.streamRevision)
+            : 'unknown';
+        return `event:${streamName}@${streamRevision}`;
+      }
+
+      if (response.caughtUp) {
+        if (response.caughtUp.position) {
+          return `caughtUp:${response.caughtUp.position.commitPosition}`;
+        }
+
+        if (response.caughtUp.streamRevision !== undefined) {
+          return `caughtUp:${String(response.caughtUp.streamRevision)}`;
+        }
+
+        return 'caughtUp:empty';
+      }
+
+      if (response.streamNotFound) {
+        const streamName = response.streamNotFound.streamIdentifier?.streamName
+          ? Buffer.from(
+              response.streamNotFound.streamIdentifier.streamName,
+            ).toString('utf8')
+          : 'unknown';
+        return `streamNotFound:${streamName}`;
+      }
+
+      if (response.firstStreamPosition !== undefined) {
+        return `firstStreamPosition:${String(response.firstStreamPosition)}`;
+      }
+
+      if (response.lastStreamPosition !== undefined) {
+        return `lastStreamPosition:${String(response.lastStreamPosition)}`;
+      }
+
+      return 'other';
+    });
+
+    return `summary=${parts.join(',')}`;
   }
 
   @GrpcStreamCall('Streams', 'append')
