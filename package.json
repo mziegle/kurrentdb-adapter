@@ -9,7 +9,9 @@
     "node": ">=24 <25"
   },
   "scripts": {
-    "generate": "protoc --proto_path=./proto/Grpc --ts_proto_out=./src/interfaces ./proto/Grpc/*.proto --ts_proto_opt=nestJs=true",
+    "generate": "npm run generate:interfaces && npm run generate:grpc-types",
+    "generate:interfaces": "protoc --proto_path=./proto/Grpc --ts_proto_out=./src/interfaces ./proto/Grpc/*.proto --ts_proto_opt=nestJs=true",
+    "generate:grpc-types": "node node_modules/@grpc/proto-loader/build/bin/proto-loader-gen-types.js -I proto/Grpc -O generated/grpc --grpcLib=@grpc/grpc-js --keepCase --longs=Number --defaults --oneofs operations.proto",
     "build": "nest build",
     "container:build": "docker build -t kurrentdb-adapter:local .",
     "container:run": "docker run --rm -p 2113:2113 kurrentdb-adapter:local",

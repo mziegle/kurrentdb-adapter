@@ -1,13 +1,4 @@
 import { KurrentDBClient } from '@kurrent/kurrentdb-client';
-import { credentials } from '@grpc/grpc-js';
-import {
-  OperationsClient,
-  IOperationsClient,
-} from '@kurrent/kurrentdb-client/generated/kurrentdb/protocols/v1/operations_grpc_pb';
-import {
-  ScavengeResp,
-  StartScavengeReq,
-} from '@kurrent/kurrentdb-client/generated/kurrentdb/protocols/v1/operations_pb';
 import {
   GenericContainer,
   Network,
@@ -16,6 +7,13 @@ import {
   Wait,
 } from 'testcontainers';
 import { wrapClientTimeouts } from '../util/wrap-client-timeouts';
+import {
+  createOperationsClient,
+  createStartScavengeRequest,
+  mapScavengeResponse,
+  OperationsScavengeResponse,
+  unaryCall,
+} from './operations-client';
 import { ScavengeCapableBackend } from './contract-test-context';
 
 const DEFAULT_POSTGRES_IMAGE = 'postgres:16-alpine';
@@ -29,10 +27,6 @@ function createClient(grpcAddress: string): KurrentDBClient {
   );
 }
 
-function createOperationsClient(grpcAddress: string): IOperationsClient {
-  return new OperationsClient(grpcAddress, credentials.createInsecure());
-}
-
 async function waitForWarmup(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 2_000));
 }
@@ -43,7 +37,7 @@ export async function setupContainerBackend(): Promise<ScavengeCapableBackend> {
   let postgresContainer: StartedTestContainer;
   let adapterContainer: StartedTestContainer;
   let client: KurrentDBClient;
-  let operationsClient: IOperationsClient;
+  let operationsClient: ReturnType<typeof createOperationsClient>;
 
   async function startPostgresContainer(): Promise<void> {
     postgresContainer = await new GenericContainer(DEFAULT_POSTGRES_IMAGE)
@@ -111,42 +105,12 @@ export async function setupContainerBackend(): Promise<ScavengeCapableBackend> {
     },
     startScavenge: async () => {
       const request = createStartScavengeRequest();
-      const response = await unaryCall<ScavengeResp>((callback) => {
-        operationsClient.startScavenge(request, callback);
-      });
-
-      return {
-        scavengeId: response.getScavengeId(),
-        scavengeResult: response.getScavengeResult(),
-      };
+      const response = await unaryCall<OperationsScavengeResponse>(
+        (callback) => {
+          operationsClient.startScavenge(request, callback);
+        },
+      );
+      return mapScavengeResponse(response);
     },
   };
-}
-
-function unaryCall<TResponse>(
-  invoke: (
-    callback: (error: Error | null, response: TResponse) => void,
-  ) => void,
-): Promise<TResponse> {
-  return new Promise<TResponse>((resolve, reject) => {
-    invoke((error, response) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-
-      resolve(response);
-    });
-  });
-}
-
-function createStartScavengeRequest(): StartScavengeReq {
-  const options = new StartScavengeReq.Options();
-  options.setThreadCount(1);
-  options.setStartFromChunk(0);
-
-  const request = new StartScavengeReq();
-  request.setOptions(options);
-
-  return request;
 }

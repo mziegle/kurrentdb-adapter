@@ -1,15 +1,13 @@
 import { KurrentDBClient } from '@kurrent/kurrentdb-client';
-import { credentials } from '@grpc/grpc-js';
-import {
-  OperationsClient,
-  IOperationsClient,
-} from '@kurrent/kurrentdb-client/generated/kurrentdb/protocols/v1/operations_grpc_pb';
-import {
-  ScavengeResp,
-  StartScavengeReq,
-} from '@kurrent/kurrentdb-client/generated/kurrentdb/protocols/v1/operations_pb';
 import { GenericContainer, StartedTestContainer, Wait } from 'testcontainers';
 import { wrapClientTimeouts } from '../util/wrap-client-timeouts';
+import {
+  createOperationsClient,
+  createStartScavengeRequest,
+  mapScavengeResponse,
+  OperationsScavengeResponse,
+  unaryCall,
+} from './operations-client';
 import { ScavengeCapableBackend } from './contract-test-context';
 
 const DEFAULT_KURRENTDB_GRPC_PORT = 2113;
@@ -61,14 +59,12 @@ export async function setupKurrentDbBackend(): Promise<ScavengeCapableBackend> {
       },
       startScavenge: async () => {
         const request = createStartScavengeRequest();
-        const response = await unaryCall<ScavengeResp>((callback) => {
-          operationsClient.startScavenge(request, callback);
-        });
-
-        return {
-          scavengeId: response.getScavengeId(),
-          scavengeResult: response.getScavengeResult(),
-        };
+        const response = await unaryCall<OperationsScavengeResponse>(
+          (callback) => {
+            operationsClient.startScavenge(request, callback);
+          },
+        );
+        return mapScavengeResponse(response);
       },
     };
   }
@@ -79,7 +75,7 @@ export async function setupKurrentDbBackend(): Promise<ScavengeCapableBackend> {
 
   let container: StartedTestContainer;
   let client: KurrentDBClient;
-  let operationsClient: IOperationsClient;
+  let operationsClient: ReturnType<typeof createOperationsClient>;
 
   async function startContainer(): Promise<void> {
     container = await new GenericContainer(image)
@@ -94,9 +90,8 @@ export async function setupKurrentDbBackend(): Promise<ScavengeCapableBackend> {
     const connectionString = createContainerConnectionString(container);
     const parsed = new URL(connectionString.replace(/^kurrentdb:/, 'http:'));
     client = createClient(connectionString);
-    operationsClient = new OperationsClient(
+    operationsClient = createOperationsClient(
       `${parsed.hostname}:${parsed.port || DEFAULT_KURRENTDB_GRPC_PORT}`,
-      credentials.createInsecure(),
     );
   }
 
@@ -116,9 +111,8 @@ export async function setupKurrentDbBackend(): Promise<ScavengeCapableBackend> {
       const connectionString = createContainerConnectionString(container);
       const parsed = new URL(connectionString.replace(/^kurrentdb:/, 'http:'));
       client = createClient(connectionString);
-      operationsClient = new OperationsClient(
+      operationsClient = createOperationsClient(
         `${parsed.hostname}:${parsed.port || DEFAULT_KURRENTDB_GRPC_PORT}`,
-        credentials.createInsecure(),
       );
     },
     dispose: async () => {
@@ -127,50 +121,12 @@ export async function setupKurrentDbBackend(): Promise<ScavengeCapableBackend> {
     },
     startScavenge: async () => {
       const request = createStartScavengeRequest();
-      const response = await unaryCall<ScavengeResp>((callback) => {
-        operationsClient.startScavenge(request, callback);
-      });
-
-      return {
-        scavengeId: response.getScavengeId(),
-        scavengeResult: response.getScavengeResult(),
-      };
+      const response = await unaryCall<OperationsScavengeResponse>(
+        (callback) => {
+          operationsClient.startScavenge(request, callback);
+        },
+      );
+      return mapScavengeResponse(response);
     },
   };
-}
-
-function createOperationsClient(connectionString: string): IOperationsClient {
-  const parsed = new URL(connectionString.replace(/^kurrentdb:/, 'http:'));
-  return new OperationsClient(
-    `${parsed.hostname}:${parsed.port || DEFAULT_KURRENTDB_GRPC_PORT}`,
-    credentials.createInsecure(),
-  );
-}
-
-function unaryCall<TResponse>(
-  invoke: (
-    callback: (error: Error | null, response: TResponse) => void,
-  ) => void,
-): Promise<TResponse> {
-  return new Promise<TResponse>((resolve, reject) => {
-    invoke((error, response) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-
-      resolve(response);
-    });
-  });
-}
-
-function createStartScavengeRequest(): StartScavengeReq {
-  const options = new StartScavengeReq.Options();
-  options.setThreadCount(1);
-  options.setStartFromChunk(0);
-
-  const request = new StartScavengeReq();
-  request.setOptions(options);
-
-  return request;
 }

@@ -138,7 +138,12 @@ npx eslint "src/**/*.ts" "test/**/*.ts"
 
 ## Protobuf Generation
 
-The protobuf source files live in `proto/`. Generated TypeScript interfaces are written to `src/interfaces`.
+The protobuf source files live in `proto/`.
+
+`npm run generate` refreshes:
+
+- Nest/ts-proto server interfaces in `src/interfaces`
+- typed gRPC contract-test helpers in `generated/grpc`
 
 Regenerate them with:
 
