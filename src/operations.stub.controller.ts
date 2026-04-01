@@ -10,20 +10,40 @@ import {
 import { Empty } from './interfaces/shared';
 import { logHotPath } from './debug-log';
 import { PostgresEventStoreService } from './postgres-event-store.service';
+import { AdapterStatsService } from './adapter-stats.service';
 
 @Controller()
 @OperationsControllerMethods()
 export class OperationsStubController implements OperationsController {
-  constructor(private readonly eventStore: PostgresEventStoreService) {}
+  constructor(
+    private readonly eventStore: PostgresEventStoreService,
+    private readonly stats: AdapterStatsService,
+  ) {}
 
   startScavenge(request: StartScavengeReq): ScavengeResp {
     logHotPath('gRPC Operations.StartScavenge');
-    return this.eventStore.startScavenge(request);
+    const operation = this.stats.startOperation('startScavenge');
+    try {
+      const response = this.eventStore.startScavenge(request);
+      operation.succeeded();
+      return response;
+    } catch (error) {
+      operation.failed();
+      throw error;
+    }
   }
 
   stopScavenge(request: StopScavengeReq): ScavengeResp {
     logHotPath('gRPC Operations.StopScavenge');
-    return this.eventStore.stopScavenge(request);
+    const operation = this.stats.startOperation('stopScavenge');
+    try {
+      const response = this.eventStore.stopScavenge(request);
+      operation.succeeded();
+      return response;
+    } catch (error) {
+      operation.failed();
+      throw error;
+    }
   }
 
   shutdown(request: Empty): Empty {

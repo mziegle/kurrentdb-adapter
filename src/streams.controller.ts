@@ -22,6 +22,7 @@ import {
   PostgresEventStoreService,
   StreamDeletedServiceError,
 } from './postgres-event-store.service';
+import { AdapterStatsService } from './adapter-stats.service';
 import {
   Metadata,
   ServerDuplexStream,
@@ -34,7 +35,10 @@ import { logHotPath, summarizeGrpcMetadata } from './debug-log';
 
 @Controller()
 export class StreamsController {
-  constructor(private readonly eventStore: PostgresEventStoreService) {}
+  constructor(
+    private readonly eventStore: PostgresEventStoreService,
+    private readonly stats: AdapterStatsService,
+  ) {}
 
   @GrpcMethod('Streams', 'read')
   read(
@@ -50,8 +54,10 @@ export class StreamsController {
         .filter(Boolean)
         .join(' '),
     });
+    const operation = this.stats.startOperation('read');
     return new Observable<ReadResp>((subscriber) => {
       let cancelled = false;
+      let completed = false;
       const cancelHandler = () => {
         cancelled = true;
       };
@@ -73,6 +79,8 @@ export class StreamsController {
             }
 
             if (!cancelled) {
+              operation.succeeded();
+              completed = true;
               subscriber.complete();
             }
 
@@ -89,8 +97,11 @@ export class StreamsController {
             subscriber.next(response);
           }
 
+          operation.succeeded();
+          completed = true;
           subscriber.complete();
         } catch (error: unknown) {
+          operation.failed();
           if (!cancelled) {
             subscriber.error(new RpcException(this.mapServiceError(error)));
           }
@@ -98,6 +109,9 @@ export class StreamsController {
       })();
 
       return () => {
+        if (cancelled && !completed) {
+          operation.failed();
+        }
         cancelled = true;
         call?.off('cancelled', cancelHandler);
       };
@@ -196,6 +210,8 @@ export class StreamsController {
     logHotPath('gRPC Streams.Append', {
       detail: summarizeGrpcMetadata(call.metadata),
     });
+    const operation = this.stats.startOperation('append');
+    let completed = false;
     const messages: AppendReq[] = [];
 
     call.on('data', (message: AppendReq) => {
@@ -205,11 +221,23 @@ export class StreamsController {
     call.on('end', () => {
       this.eventStore
         .append(messages)
-        .then((response) => callback(null, response))
-        .catch((error: unknown) => callback(this.mapServiceError(error), null));
+        .then((response) => {
+          completed = true;
+          operation.succeeded();
+          callback(null, response);
+        })
+        .catch((error: unknown) => {
+          completed = true;
+          operation.failed();
+          callback(this.mapServiceError(error), null);
+        });
     });
 
     call.on('error', (error) => {
+      if (!completed) {
+        completed = true;
+        operation.failed();
+      }
       callback(error, null);
     });
   }
@@ -222,9 +250,17 @@ export class StreamsController {
     logHotPath('gRPC Streams.Delete', {
       detail: summarizeGrpcMetadata(metadata),
     });
-    return this.eventStore.delete(request).catch((error: unknown) => {
-      throw new RpcException(this.mapServiceError(error));
-    });
+    const operation = this.stats.startOperation('delete');
+    return this.eventStore
+      .delete(request)
+      .then((response) => {
+        operation.succeeded();
+        return response;
+      })
+      .catch((error: unknown) => {
+        operation.failed();
+        throw new RpcException(this.mapServiceError(error));
+      });
   }
 
   @GrpcMethod('Streams', 'tombstone')
@@ -235,9 +271,17 @@ export class StreamsController {
     logHotPath('gRPC Streams.Tombstone', {
       detail: summarizeGrpcMetadata(metadata),
     });
-    return this.eventStore.tombstone(request).catch((error: unknown) => {
-      throw new RpcException(this.mapServiceError(error));
-    });
+    const operation = this.stats.startOperation('tombstone');
+    return this.eventStore
+      .tombstone(request)
+      .then((response) => {
+        operation.succeeded();
+        return response;
+      })
+      .catch((error: unknown) => {
+        operation.failed();
+        throw new RpcException(this.mapServiceError(error));
+      });
   }
 
   @GrpcStreamCall('Streams', 'batchAppend')
@@ -321,14 +365,18 @@ export class StreamsController {
     requestGroup: BatchAppendReq[],
     enqueueResponse: (response: BatchAppendResp) => Promise<void>,
   ): Promise<void> {
+    const operation = this.stats.startOperation('batchAppend');
     try {
       const response = await this.eventStore.batchAppend(requestGroup);
       if (call.destroyed) {
+        operation.succeeded();
         return;
       }
 
       await enqueueResponse(response);
+      operation.succeeded();
     } catch (error: unknown) {
+      operation.failed();
       if (!call.destroyed) {
         call.destroy(this.mapServiceError(error));
       }

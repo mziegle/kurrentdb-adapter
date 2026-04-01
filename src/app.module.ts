@@ -8,6 +8,7 @@ import { PostgresEventStoreService } from './postgres-event-store.service';
 import { ServerFeaturesController } from './server-features.controller';
 import { StreamsController } from './streams.controller';
 import { UsersStubController } from './users.stub.controller';
+import { AdapterStatsService } from './adapter-stats.service';
 
 @Module({
   imports: [],
@@ -20,6 +21,6 @@ import { UsersStubController } from './users.stub.controller';
     StreamsController,
     UsersStubController,
   ],
-  providers: [AppService, PostgresEventStoreService],
+  providers: [AppService, PostgresEventStoreService, AdapterStatsService],
 })
 export class AppModule {}

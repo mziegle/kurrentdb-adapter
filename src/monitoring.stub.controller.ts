@@ -1,20 +1,22 @@
 import { Controller } from '@nestjs/common';
-import { Observable } from 'rxjs';
+import { from, Observable } from 'rxjs';
 import {
   MonitoringController,
   MonitoringControllerMethods,
   StatsReq,
   StatsResp,
 } from './interfaces/monitoring';
-import { createStatsStream } from './stub-utils';
 import { logHotPath } from './debug-log';
+import { AdapterStatsService } from './adapter-stats.service';
 
 @Controller()
 @MonitoringControllerMethods()
 export class MonitoringStubController implements MonitoringController {
+  constructor(private readonly statsService: AdapterStatsService) {}
+
   stats(request: StatsReq): Observable<StatsResp> {
     void request;
     logHotPath('gRPC Monitoring.Stats');
-    return createStatsStream();
+    return from(this.statsService.createGrpcStats());
   }
 }

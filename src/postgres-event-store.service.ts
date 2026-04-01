@@ -102,6 +102,18 @@ type ActiveScavenge = {
   cancelled: boolean;
 };
 
+export type EventStoreStatsSnapshot = {
+  activeScavenges: number;
+  currentGlobalPosition: number;
+  pgPoolIdleCount: number;
+  pgPoolTotalCount: number;
+  pgPoolWaitingCount: number;
+  retentionPolicyCount: number;
+  streamCount: number;
+  tombstonedStreamCount: number;
+  totalEvents: number;
+};
+
 export class StreamDeletedServiceError extends Error {
   constructor(readonly streamName: string) {
     super(`Stream "${streamName}" is deleted.`);
@@ -198,6 +210,41 @@ export class PostgresEventStoreService
 
   async onModuleDestroy(): Promise<void> {
     await this.pool.end();
+  }
+
+  async getStatsSnapshot(): Promise<EventStoreStatsSnapshot> {
+    const result = await this.pool.query<{
+      current_global_position: string | number | null;
+      retention_policy_count: string | number;
+      stream_count: string | number;
+      tombstoned_stream_count: string | number;
+      total_events: string | number;
+    }>(
+      `
+        SELECT
+          (SELECT MAX(global_position) FROM stream_events) AS current_global_position,
+          (SELECT COUNT(*) FROM stream_events) AS total_events,
+          (SELECT COUNT(DISTINCT stream_name) FROM stream_events) AS stream_count,
+          (SELECT COUNT(*) FROM tombstoned_streams) AS tombstoned_stream_count,
+          (SELECT COUNT(*) FROM stream_retention_policies) AS retention_policy_count
+      `,
+    );
+    const row = result.rows[0];
+
+    return {
+      activeScavenges: this.activeScavenges.size,
+      currentGlobalPosition:
+        row.current_global_position === null
+          ? 0
+          : this.toNumber(row.current_global_position),
+      pgPoolIdleCount: this.pool.idleCount,
+      pgPoolTotalCount: this.pool.totalCount,
+      pgPoolWaitingCount: this.pool.waitingCount,
+      retentionPolicyCount: this.toNumber(row.retention_policy_count),
+      streamCount: this.toNumber(row.stream_count),
+      tombstonedStreamCount: this.toNumber(row.tombstoned_stream_count),
+      totalEvents: this.toNumber(row.total_events),
+    };
   }
 
   async append(messages: AppendReq[]): Promise<AppendResp> {

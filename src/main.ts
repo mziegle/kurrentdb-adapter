@@ -10,11 +10,11 @@ import {
   AddressInfo,
 } from 'node:net';
 import {
-  createHttpGossipResponseBody,
-  createHttpStatsResponseBody,
   createInfoResponseBody,
+  createHttpGossipResponseBody,
 } from './stub-utils';
 import { logHotPath } from './debug-log';
+import { AdapterStatsService } from './adapter-stats.service';
 
 async function bootstrap() {
   const grpcUrl = process.env.GRPC_URL ?? '0.0.0.0:2113';
@@ -55,7 +55,8 @@ async function bootstrap() {
 
   await app.listen();
 
-  const proxyServer = await startProbeProxy(grpcUrl, internalGrpcUrl);
+  const stats = app.get(AdapterStatsService);
+  const proxyServer = await startProbeProxy(grpcUrl, internalGrpcUrl, stats);
   const proxyAddress = proxyServer.address() as AddressInfo;
   console.info(
     `Probe proxy listening on ${proxyAddress.address}:${proxyAddress.port} and forwarding to ${internalGrpcUrl}`,
@@ -107,6 +108,7 @@ function parseTcpEndpoint(urlOrHostPort: string): {
 async function startProbeProxy(
   publicGrpcUrl: string,
   internalGrpcUrl: string,
+  stats: AdapterStatsService,
 ): Promise<NetServer> {
   const publicEndpoint = parseTcpEndpoint(publicGrpcUrl);
   const internalEndpoint = parseTcpEndpoint(internalGrpcUrl);
@@ -147,7 +149,7 @@ async function startProbeProxy(
         return;
       }
 
-      if (tryHandleStatsRequest(clientSocket, chunk)) {
+      if (tryHandleStatsRequest(clientSocket, chunk, stats)) {
         interceptedHealthCheck = true;
         return;
       }
@@ -332,22 +334,41 @@ function tryHandleGossipRequest(clientSocket: Socket, chunk: Buffer): boolean {
   return true;
 }
 
-function tryHandleStatsRequest(clientSocket: Socket, chunk: Buffer): boolean {
+function tryHandleStatsRequest(
+  clientSocket: Socket,
+  chunk: Buffer,
+  stats: AdapterStatsService,
+): boolean {
   const requestLine = chunk.subarray(0, 64).toString('utf8');
 
   if (!requestLine.startsWith('GET /stats HTTP/1.1')) {
     return false;
   }
 
-  const body = createHttpStatsResponseBody();
-  writeHttpResponse(
-    clientSocket,
-    'GET /stats',
-    200,
-    'OK',
-    'application/json; charset=utf-8',
-    body,
-  );
+  void stats
+    .createHttpStatsResponseBody()
+    .then((body) => {
+      writeHttpResponse(
+        clientSocket,
+        'GET /stats',
+        200,
+        'OK',
+        'application/json; charset=utf-8',
+        body,
+      );
+    })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Failed to build /stats response: ${message}`);
+      writeHttpResponse(
+        clientSocket,
+        'GET /stats',
+        500,
+        'Internal Server Error',
+        'text/plain; charset=utf-8',
+        'stats unavailable',
+      );
+    });
   return true;
 }
 
