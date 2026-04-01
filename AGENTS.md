@@ -2,6 +2,8 @@
 
 ## Current shape of the project
 
+- Use repo-local paths and relative references in docs, comments, and skills.
+- Do not use global filesystem paths such as `C:\Users\...` in repo content unless the user explicitly asks for them.
 - This repo is a NestJS gRPC adapter that exposes the KurrentDB/EventStore `Streams` service.
 - Persistence is backed by PostgreSQL in [src/postgres-event-store.service.ts](c:/Users/User/source/repos/kurrentdb-adapter/src/postgres-event-store.service.ts).
 - E2E coverage is in [test/streams.e2e-spec.ts](c:/Users/User/source/repos/kurrentdb-adapter/test/streams.e2e-spec.ts) and uses Testcontainers with Docker.
@@ -27,7 +29,7 @@
 - The Kurrent client converts that into `StreamNotFoundError`.
 
 - Scavenging behavior is subtle and should follow the verified KurrentDB notes in
-  [docs/scavenging.md](c:/Users/micha/Repos/kurrentdb-adapter/docs/scavenging.md).
+  [docs/scavenging.md](c:/Users/User/source/repos/kurrentdb-adapter/docs/scavenging.md).
 - In particular, `$tb`, `$maxCount`, and `$maxAge` hide events from stream reads
   before scavenging, but KurrentDB keeps those records in storage and in `$all`
   until a scavenge runs.

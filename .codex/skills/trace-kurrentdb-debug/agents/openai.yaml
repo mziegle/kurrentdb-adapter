@@ -1,0 +1,4 @@
+interface:
+  display_name: "Trace KurrentDB Debug"
+  short_description: "Debug adapter behavior with the trace proxy."
+  default_prompt: "Use this skill to debug KurrentDB adapter and Navigator behavior with scripts/trace-kurrentdb.js in the current repo."
