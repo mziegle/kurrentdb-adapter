@@ -7,7 +7,7 @@ function testStreamName(prefix: string): string {
 }
 
 export async function runAppendTest(backend: BackendClient): Promise<{ stream: string; appended: number }> {
-  const stream = testStreamName('kdb-cli-append-test');
+  const stream = testStreamName('kcli-append-test');
   await backend.appendToStream(stream, [
     { eventType: 'append-test', data: { case: 'append', seq: 1 } },
   ]);
@@ -16,7 +16,7 @@ export async function runAppendTest(backend: BackendClient): Promise<{ stream: s
 }
 
 export async function runReadTest(backend: BackendClient): Promise<{ stream: string; read: number }> {
-  const stream = testStreamName('kdb-cli-read-test');
+  const stream = testStreamName('kcli-read-test');
   await backend.appendToStream(stream, [
     { eventType: 'read-test', data: { case: 'read', seq: 1 } },
     { eventType: 'read-test', data: { case: 'read', seq: 2 } },
@@ -27,7 +27,7 @@ export async function runReadTest(backend: BackendClient): Promise<{ stream: str
 }
 
 export async function runSubscribeTest(backend: BackendClient): Promise<{ stream: string; delivered: number }> {
-  const stream = testStreamName('kdb-cli-subscribe-test');
+  const stream = testStreamName('kcli-subscribe-test');
   const received: string[] = [];
 
   const readPromise = (async (): Promise<void> => {

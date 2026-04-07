@@ -14,18 +14,18 @@ export class MockBackendClient implements BackendClient {
 
   constructor(public readonly name = 'mock') {}
 
-  async ping(): Promise<PingResult> {
-    return { ok: true, latencyMs: 1 };
+  ping(): Promise<PingResult> {
+    return Promise.resolve({ ok: true, latencyMs: 1 });
   }
 
-  async readStream(stream: string, options: ReadStreamOptions = {}): Promise<EventData[]> {
+  readStream(stream: string, options: ReadStreamOptions = {}): Promise<EventData[]> {
     const events = this.streams.get(stream) ?? [];
     const from = Number(options.fromRevision ?? 0n);
     const limit = options.limit ?? events.length;
-    return events.slice(from, from + limit);
+    return Promise.resolve(events.slice(from, from + limit));
   }
 
-  async appendToStream(
+  appendToStream(
     stream: string,
     events: AppendEventInput[],
     expectedRevision?: ExpectedRevision,
@@ -50,7 +50,9 @@ export class MockBackendClient implements BackendClient {
 
     this.streams.set(stream, [...current, ...mapped]);
 
-    return { nextExpectedRevision: BigInt(current.length + mapped.length - 1) };
+    return Promise.resolve({
+      nextExpectedRevision: BigInt(current.length + mapped.length - 1),
+    });
   }
 
   async *subscribeToStream(stream: string, fromRevision = 0n): AsyncIterable<EventData> {

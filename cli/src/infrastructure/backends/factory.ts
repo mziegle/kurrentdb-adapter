@@ -1,4 +1,4 @@
-import type { CliConfig } from '../../config/config.js';
+import { requireBackendConfig, type CliConfig } from '../../config/config.js';
 import type { BackendClient } from '../../domain/backend.js';
 import type { BackendName } from '../../domain/types.js';
 
@@ -6,7 +6,7 @@ export async function createBackendClient(
   config: CliConfig,
   backend: BackendName,
 ): Promise<BackendClient> {
-  const backendConfig = config.backends[backend];
+  const backendConfig = requireBackendConfig(config, backend);
 
   if (backendConfig.kind === 'kurrent') {
     try {

@@ -1,9 +1,15 @@
 import {
+  ANY,
   FORWARDS,
   KurrentDBClient,
+  NO_STREAM,
   START,
+  STREAM_EXISTS,
   jsonEvent,
-  type StreamRevision,
+  type AppendStreamState,
+  type JSONType,
+  type ReadRevision,
+  type ResolvedEvent,
 } from '@kurrent/kurrentdb-client';
 import type { BackendClient } from '../../domain/backend.js';
 import type {
@@ -15,19 +21,29 @@ import type {
   ReadStreamOptions,
 } from '../../domain/types.js';
 
-function toExpectedRevision(revision: ExpectedRevision | undefined): bigint | 'any' | 'no_stream' | 'stream_exists' {
+function toExpectedRevision(
+  revision: ExpectedRevision | undefined,
+): AppendStreamState {
   if (revision === undefined) {
-    return 'any';
+    return ANY;
+  }
+
+  if (revision === 'no_stream') {
+    return NO_STREAM;
+  }
+
+  if (revision === 'stream_exists') {
+    return STREAM_EXISTS;
   }
 
   return revision;
 }
 
-function toFromRevision(revision: bigint | undefined): StreamRevision {
+function toFromRevision(revision: bigint | undefined): ReadRevision {
   return revision === undefined ? START : revision;
 }
 
-function mapResolvedEvent(resolved: { event?: { id: { toString(): string }; type: string; data: unknown; metadata: unknown; revision: bigint; position?: { commit: bigint } } }): EventData | null {
+function mapResolvedEvent(resolved: ResolvedEvent): EventData | null {
   if (!resolved.event) {
     return null;
   }
@@ -104,12 +120,12 @@ export class KurrentBackendClient implements BackendClient {
       events.map((item) =>
         jsonEvent({
           type: item.eventType,
-          data: item.data,
-          metadata: item.metadata,
+          data: item.data as JSONType,
+          metadata: item.metadata as JSONType | undefined,
         }),
       ),
       {
-        expectedRevision: toExpectedRevision(expectedRevision),
+        streamState: toExpectedRevision(expectedRevision),
       },
     );
 

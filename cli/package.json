@@ -5,18 +5,28 @@
   "description": "Developer CLI/TUI for testing KurrentDB-compatible adapters",
   "type": "module",
   "bin": {
-    "kdb-cli": "dist/index.js"
+    "kcli": "dist/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "npm run build --silent && node dist/index.js",
-    "test": "npm run build && node --test test/*.spec.mjs",
-    "lint": "tsc -p tsconfig.json --noEmit"
+    "test": "npm run build && node --test --test-isolation=none test/*.spec.mjs",
+    "lint": "eslint \"src/**/*.ts\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepare": "npm run build"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
     "@kurrent/kurrentdb-client": "^1.0.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@types/node": "^22.10.7",
+    "eslint": "^9.18.0",
+    "globals": "^16.0.0",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.20.0"
   }
 }

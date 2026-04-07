@@ -10,7 +10,7 @@ export default tseslint.config(
     languageOptions: {
       globals: {
         ...globals.node,
-        ...globals.jest,
+        test: false,
       },
       sourceType: 'module',
       parserOptions: {

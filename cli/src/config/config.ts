@@ -9,20 +9,10 @@ export interface BackendConfig {
 
 export interface CliConfig {
   defaultBackend: BackendName;
-  backends: Record<BackendName, BackendConfig>;
+  backends: Partial<Record<BackendName, BackendConfig>>;
 }
 
-const DEFAULT_CONFIG_FILE = 'kdb-cli.config.json';
-
-function requireConnectionString(value: string | undefined, backend: BackendName): string {
-  if (!value) {
-    throw new Error(
-      `Missing connection string for '${backend}'. Set env var KDB_${backend.toUpperCase()}_CONNECTION or add ${DEFAULT_CONFIG_FILE}.`,
-    );
-  }
-
-  return value;
-}
+const DEFAULT_CONFIG_FILE = 'kcli.config.json';
 
 async function maybeLoadConfigFile(): Promise<Partial<CliConfig>> {
   const configuredPath = process.env.KDB_CLI_CONFIG_PATH;
@@ -36,32 +26,49 @@ async function maybeLoadConfigFile(): Promise<Partial<CliConfig>> {
   }
 }
 
+function maybeBackendConfig(
+  value: string | undefined,
+): BackendConfig | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  return {
+    kind: 'kurrent',
+    connectionString: value,
+  };
+}
+
 export async function loadConfig(): Promise<CliConfig> {
   const fileConfig = await maybeLoadConfigFile();
 
   const referenceFromFile = fileConfig.backends?.reference?.connectionString;
   const adapterFromFile = fileConfig.backends?.adapter?.connectionString;
 
-  const referenceConnectionString = requireConnectionString(
-    process.env.KDB_REFERENCE_CONNECTION ?? referenceFromFile,
-    'reference',
-  );
-  const adapterConnectionString = requireConnectionString(
-    process.env.KDB_ADAPTER_CONNECTION ?? adapterFromFile,
-    'adapter',
-  );
-
   return {
     defaultBackend: fileConfig.defaultBackend ?? 'adapter',
     backends: {
-      reference: {
-        kind: 'kurrent',
-        connectionString: referenceConnectionString,
-      },
-      adapter: {
-        kind: 'kurrent',
-        connectionString: adapterConnectionString,
-      },
+      reference: maybeBackendConfig(
+        process.env.KDB_REFERENCE_CONNECTION ?? referenceFromFile,
+      ),
+      adapter: maybeBackendConfig(
+        process.env.KDB_ADAPTER_CONNECTION ?? adapterFromFile,
+      ),
     },
   };
+}
+
+export function requireBackendConfig(
+  config: CliConfig,
+  backend: BackendName,
+): BackendConfig {
+  const backendConfig = config.backends[backend];
+
+  if (!backendConfig) {
+    throw new Error(
+      `Missing connection string for '${backend}'. Set env var KDB_${backend.toUpperCase()}_CONNECTION or add ${DEFAULT_CONFIG_FILE}.`,
+    );
+  }
+
+  return backendConfig;
 }

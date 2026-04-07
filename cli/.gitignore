@@ -1,0 +1,10 @@
+node_modules/
+dist/
+
+# Local CLI backend configuration
+kcli.config.json
+
+# Logs and diagnostics
+*.log
+npm-debug.log*
+report.*.json

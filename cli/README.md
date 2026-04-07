@@ -1,4 +1,4 @@
-# kdb-cli
+# kcli
 
 Developer-focused TypeScript CLI/TUI for validating a KurrentDB/EventStoreDB-compatible backend (for example this adapter) against a reference backend.
 
@@ -15,13 +15,27 @@ Developer-focused TypeScript CLI/TUI for validating a KurrentDB/EventStoreDB-com
   - `test compare --stream <stream>`
 - Optional interactive TUI (`tui --stream <stream>`) for live stream event watching.
 
-## Setup
+## Install
 
 ```bash
 cd cli
-# dependencies are resolved from the repository root node_modules
-# run npm install at the repository root if needed
+npm install
+npm link
 ```
+
+After that, the command is available as:
+
+```bash
+kcli ping --backend adapter
+```
+
+To remove the global link later:
+
+```bash
+npm unlink -g kurrentdb-adapter-cli
+```
+
+The CLI has its own `package.json` and should be installed and tooled from `cli/`, independent of the adapter's root package.
 
 ## Configuration
 
@@ -35,7 +49,7 @@ Configuration sources (in order of precedence):
 1. Environment variables:
    - `KDB_REFERENCE_CONNECTION`
    - `KDB_ADAPTER_CONNECTION`
-2. Config file: `kdb-cli.config.json` (or custom path via `KDB_CLI_CONFIG_PATH`)
+2. Config file: `kcli.config.json` (or custom path via `KDB_CLI_CONFIG_PATH`)
 
 Example config file:
 
@@ -60,20 +74,20 @@ Example config file:
 ### Ping
 
 ```bash
-npm run dev -- ping --backend adapter
+kcli ping --backend adapter
 ```
 
 ### Stream read
 
 ```bash
-npm run dev -- stream read my-stream --from 0 --limit 20
-npm run dev -- stream read my-stream --json
+kcli stream read my-stream --from 0 --limit 20
+kcli stream read my-stream --json
 ```
 
 ### Stream append
 
 ```bash
-npm run dev -- stream append my-stream \
+kcli stream append my-stream \
   --type user-created \
   --data '{"userId":"u-1","name":"Alice"}' \
   --metadata '{"source":"cli"}' \
@@ -83,21 +97,21 @@ npm run dev -- stream append my-stream \
 ### Stream tail
 
 ```bash
-npm run dev -- stream tail my-stream
+kcli stream tail my-stream
 ```
 
 ### Focused tests
 
 ```bash
-npm run dev -- test append
-npm run dev -- test read
-npm run dev -- test subscribe
+kcli test append
+kcli test read
+kcli test subscribe
 ```
 
 ### Compare adapter vs reference
 
 ```bash
-npm run dev -- test compare --stream my-stream
+kcli test compare --stream my-stream
 ```
 
 This compares event id/type/revision/position/data/metadata/ordering.
@@ -105,15 +119,17 @@ This compares event id/type/revision/position/data/metadata/ordering.
 ### TUI
 
 ```bash
-npm run dev -- tui --stream my-stream
+kcli tui --stream my-stream
 ```
 
 ## Scripts
 
 - `npm run build` compile to `dist`
 - `npm run dev -- <command>` build and run CLI locally
+- `npm link` expose the built CLI as the global `kcli` command
 - `npm run test` run automated tests
-- `npm run lint` lint source and tests
+- `npm run lint` run ESLint on CLI source
+- `npm run typecheck` run TypeScript without emitting files
 
 ## Architecture
 

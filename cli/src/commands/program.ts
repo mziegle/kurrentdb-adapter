@@ -13,16 +13,22 @@ import { runTui } from '../tui/app.js';
 
 interface ParsedArgs {
   backend?: BackendName;
+  help: boolean;
   json: boolean;
   positionals: string[];
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
   const positionals: string[] = [];
-  const parsed: ParsedArgs = { json: false, positionals };
+  const parsed: ParsedArgs = { help: false, json: false, positionals };
 
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
+
+    if (value === '--help' || value === '-h') {
+      parsed.help = true;
+      continue;
+    }
 
     if (value === '--json') {
       parsed.json = true;
@@ -80,12 +86,32 @@ function resolveBackend(parsed: ParsedArgs, config: CliConfig): BackendName {
   return parsed.backend ?? config.defaultBackend;
 }
 
+function printHelp(): void {
+  console.log(`kcli
+
+Usage:
+  kcli ping [--backend <adapter|reference>] [--json]
+  kcli stream read <stream> [--from <revision>] [--limit <count>] [--backend <adapter|reference>] [--json]
+  kcli stream append <stream> --type <event-type> --data <json> [--metadata <json>] [--expected-revision <any|no_stream|stream_exists|revision>] [--backend <adapter|reference>] [--json]
+  kcli stream tail <stream> [--from <revision>] [--backend <adapter|reference>] [--json]
+  kcli test append [--backend <adapter|reference>] [--json]
+  kcli test read [--backend <adapter|reference>] [--json]
+  kcli test subscribe [--backend <adapter|reference>] [--json]
+  kcli test compare --stream <stream> [--json]
+  kcli tui --stream <stream> [--backend <adapter|reference>]
+
+Config:
+  Set KDB_ADAPTER_CONNECTION and/or KDB_REFERENCE_CONNECTION
+  or create kcli.config.json in the current directory.`);
+}
+
 export async function runProgram(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv);
   const [group, action, target] = parsed.positionals;
 
-  if (!group) {
-    throw new Error('No command provided. Try: ping, stream, test, tui');
+  if (parsed.help || group === 'help' || !group) {
+    printHelp();
+    return;
   }
 
   const config = await loadConfig();
