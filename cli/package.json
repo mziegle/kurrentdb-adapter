@@ -1,0 +1,22 @@
+{
+  "name": "kurrentdb-adapter-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Developer CLI/TUI for testing KurrentDB-compatible adapters",
+  "type": "module",
+  "bin": {
+    "kdb-cli": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "npm run build --silent && node dist/index.js",
+    "test": "npm run build && node --test test/*.spec.mjs",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@kurrent/kurrentdb-client": "^1.0.2"
+  }
+}
