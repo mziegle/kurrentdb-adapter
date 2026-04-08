@@ -127,11 +127,13 @@ export class PostgresEventStoreService
   implements OnModuleInit, OnModuleDestroy
 {
   private static readonly ALL_STREAM_KEY = '$all';
+  private static readonly STREAM_UPDATES_CHANNEL = 'kurrentdb_stream_updates';
   private static readonly SERVER_INFO_STREAM = '$server-info';
   private static readonly STREAMS_STREAM = '$streams';
   private static readonly SCAVENGES_STREAM = '$scavenges';
   private static readonly SCAVENGE_BATCH_SIZE = 500;
   private readonly pool = new Pool(this.getPoolConfig());
+  private listenClient: PoolClient | null = null;
   private readonly streamVersions = new Map<string, number>();
   private readonly streamListeners = new Map<string, Set<() => void>>();
   private readonly activeScavenges = new Map<string, ActiveScavenge>();
@@ -206,9 +208,22 @@ export class PostgresEventStoreService
       ALTER TABLE stream_retention_policies
       ADD COLUMN IF NOT EXISTS max_age BIGINT NULL
     `);
+
+    await this.initializeStreamUpdateListener();
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.listenClient) {
+      try {
+        await this.listenClient.query(
+          `UNLISTEN ${PostgresEventStoreService.STREAM_UPDATES_CHANNEL}`,
+        );
+      } finally {
+        this.listenClient.release();
+        this.listenClient = null;
+      }
+    }
+
     await this.pool.end();
   }
 
@@ -374,7 +389,7 @@ export class PostgresEventStoreService
       await client.query('COMMIT');
 
       if (proposedMessages.length > 0) {
-        this.notifyStreamUpdated(streamName);
+        await this.notifyStreamUpdated(streamName);
       }
 
       if (proposedMessages.length === 0) {
@@ -835,7 +850,7 @@ export class PostgresEventStoreService
 
       await client.query('COMMIT');
 
-      this.notifyStreamUpdated(streamName);
+      await this.notifyStreamUpdated(streamName);
 
       const lastPosition = this.toNumber(lastEvent.rows[0].global_position);
 
@@ -964,7 +979,7 @@ export class PostgresEventStoreService
 
       await client.query('COMMIT');
 
-      this.notifyStreamUpdated(streamName);
+      await this.notifyStreamUpdated(streamName);
 
       return {
         position: {
@@ -1527,9 +1542,34 @@ export class PostgresEventStoreService
     return this.streamVersions.get(streamName) ?? 0;
   }
 
-  private notifyStreamUpdated(streamName: string): void {
-    this.bumpStreamVersion(streamName);
-    this.bumpStreamVersion(PostgresEventStoreService.ALL_STREAM_KEY);
+  private async initializeStreamUpdateListener(): Promise<void> {
+    this.listenClient = await this.pool.connect();
+    this.listenClient.on('notification', (notification) => {
+      if (
+        notification.channel !==
+        PostgresEventStoreService.STREAM_UPDATES_CHANNEL
+      ) {
+        return;
+      }
+
+      const streamName = notification.payload;
+      if (!streamName) {
+        return;
+      }
+
+      this.bumpStreamVersion(streamName);
+      this.bumpStreamVersion(PostgresEventStoreService.ALL_STREAM_KEY);
+    });
+    await this.listenClient.query(
+      `LISTEN ${PostgresEventStoreService.STREAM_UPDATES_CHANNEL}`,
+    );
+  }
+
+  private async notifyStreamUpdated(streamName: string): Promise<void> {
+    await this.pool.query(
+      'SELECT pg_notify($1, $2)',
+      [PostgresEventStoreService.STREAM_UPDATES_CHANNEL, streamName],
+    );
   }
 
   private bumpStreamVersion(streamName: string): void {
