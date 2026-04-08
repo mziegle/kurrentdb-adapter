@@ -1,4 +1,4 @@
-import { Controller } from '@nestjs/common';
+import { Controller, Inject } from '@nestjs/common';
 import {
   OperationsController,
   OperationsControllerMethods,
@@ -9,14 +9,15 @@ import {
 } from './interfaces/operations';
 import { Empty } from './interfaces/shared';
 import { logHotPath } from './debug-log';
-import { PostgresEventStoreService } from './postgres-event-store.service';
 import { AdapterStatsService } from './adapter-stats.service';
+import { EVENT_STORE_BACKEND, EventStoreBackend } from './event-store-backend';
 
 @Controller()
 @OperationsControllerMethods()
 export class OperationsStubController implements OperationsController {
   constructor(
-    private readonly eventStore: PostgresEventStoreService,
+    @Inject(EVENT_STORE_BACKEND)
+    private readonly eventStore: EventStoreBackend,
     private readonly stats: AdapterStatsService,
   ) {}
 

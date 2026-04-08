@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import {
   cpus,
   freemem,
@@ -9,9 +9,10 @@ import {
 } from 'node:os';
 import { parse as parsePath } from 'node:path';
 import {
-  PostgresEventStoreService,
+  EVENT_STORE_BACKEND,
+  EventStoreBackend,
   type EventStoreStatsSnapshot,
-} from './postgres-event-store.service';
+} from './event-store-backend';
 import { StatsResp } from './interfaces/monitoring';
 
 type OperationName =
@@ -59,7 +60,10 @@ export class AdapterStatsService {
     | undefined;
   private pendingSnapshot: Promise<AdapterStatsSnapshot> | undefined;
 
-  constructor(private readonly eventStore: PostgresEventStoreService) {}
+  constructor(
+    @Inject(EVENT_STORE_BACKEND)
+    private readonly eventStore: EventStoreBackend,
+  ) {}
 
   startOperation(name: OperationName): {
     failed: () => void;

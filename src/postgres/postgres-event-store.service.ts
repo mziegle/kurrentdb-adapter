@@ -24,17 +24,25 @@ import {
   ReadResp,
   TombstoneReq,
   TombstoneResp,
-} from './interfaces/streams';
+} from '../interfaces/streams';
 import {
   ScavengeResp,
   ScavengeResp_ScavengeResult,
   StartScavengeReq,
   StopScavengeReq,
-} from './interfaces/operations';
-import { Code } from './interfaces/code';
-import { Any } from './interfaces/google/protobuf/any';
-import { Timestamp } from './interfaces/google/protobuf/timestamp';
-import { createInfoResponseBody } from './stub-utils';
+} from '../interfaces/operations';
+import { Code } from '../interfaces/code';
+import { Any } from '../interfaces/google/protobuf/any';
+import { Timestamp } from '../interfaces/google/protobuf/timestamp';
+import { createInfoResponseBody } from '../stub-utils';
+import {
+  EventStoreBackend,
+  EventStoreStatsSnapshot,
+} from '../event-store-backend';
+import {
+  InvalidArgumentServiceError,
+  StreamDeletedServiceError,
+} from '../event-store.errors';
 
 type PersistedEventRow = {
   global_position: string | number;
@@ -102,29 +110,9 @@ type ActiveScavenge = {
   cancelled: boolean;
 };
 
-export type EventStoreStatsSnapshot = {
-  activeScavenges: number;
-  currentGlobalPosition: number;
-  pgPoolIdleCount: number;
-  pgPoolTotalCount: number;
-  pgPoolWaitingCount: number;
-  retentionPolicyCount: number;
-  streamCount: number;
-  tombstonedStreamCount: number;
-  totalEvents: number;
-};
-
-export class StreamDeletedServiceError extends Error {
-  constructor(readonly streamName: string) {
-    super(`Stream "${streamName}" is deleted.`);
-  }
-}
-
-export class InvalidArgumentServiceError extends Error {}
-
 @Injectable()
 export class PostgresEventStoreService
-  implements OnModuleInit, OnModuleDestroy
+  implements EventStoreBackend, OnModuleInit, OnModuleDestroy
 {
   private static readonly ALL_STREAM_KEY = '$all';
   private static readonly STREAM_UPDATES_CHANNEL = 'kurrentdb_stream_updates';

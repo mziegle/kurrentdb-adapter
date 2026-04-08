@@ -1,4 +1,4 @@
-import { Controller } from '@nestjs/common';
+import { Controller, Inject } from '@nestjs/common';
 import {
   GrpcMethod,
   GrpcStreamCall,
@@ -17,11 +17,11 @@ import {
   TombstoneResp,
 } from '../interfaces/streams';
 import { Observable } from 'rxjs';
+import { EVENT_STORE_BACKEND, EventStoreBackend } from '../event-store-backend';
 import {
   InvalidArgumentServiceError,
-  PostgresEventStoreService,
   StreamDeletedServiceError,
-} from '../postgres-event-store.service';
+} from '../event-store.errors';
 import { AdapterStatsService } from '../adapter-stats.service';
 import {
   Metadata,
@@ -37,7 +37,8 @@ import { BatchAppendSession } from './batch-append-session';
 @Controller()
 export class StreamsController {
   constructor(
-    private readonly eventStore: PostgresEventStoreService,
+    @Inject(EVENT_STORE_BACKEND)
+    private readonly eventStore: EventStoreBackend,
     private readonly stats: AdapterStatsService,
   ) {}
 
