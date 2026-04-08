@@ -15,14 +15,14 @@ import {
   ReadResp,
   TombstoneReq,
   TombstoneResp,
-} from './interfaces/streams';
+} from '../interfaces/streams';
 import { Observable } from 'rxjs';
 import {
   InvalidArgumentServiceError,
   PostgresEventStoreService,
   StreamDeletedServiceError,
-} from './postgres-event-store.service';
-import { AdapterStatsService } from './adapter-stats.service';
+} from '../postgres-event-store.service';
+import { AdapterStatsService } from '../adapter-stats.service';
 import {
   Metadata,
   ServerReadableStream,
@@ -31,7 +31,7 @@ import {
   status,
 } from '@grpc/grpc-js';
 import { ServerDuplexStream } from '@grpc/grpc-js';
-import { logHotPath, summarizeGrpcMetadata } from './debug-log';
+import { logHotPath, summarizeGrpcMetadata } from '../debug-log';
 import { BatchAppendSession } from './batch-append-session';
 
 @Controller()

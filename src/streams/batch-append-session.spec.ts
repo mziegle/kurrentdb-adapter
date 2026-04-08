@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { BatchAppendReq, BatchAppendResp } from './interfaces/streams';
+import { BatchAppendReq, BatchAppendResp } from '../interfaces/streams';
 import { BatchAppendSession } from './batch-append-session';
 
 class FakeBatchAppendCall extends EventEmitter {

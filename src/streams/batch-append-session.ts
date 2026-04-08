@@ -1,5 +1,5 @@
 import { ServerDuplexStream } from '@grpc/grpc-js';
-import { BatchAppendReq, BatchAppendResp } from './interfaces/streams';
+import { BatchAppendReq, BatchAppendResp } from '../interfaces/streams';
 
 export class BatchAppendSession {
   private readonly pendingMessages = new Map<string, BatchAppendReq[]>();

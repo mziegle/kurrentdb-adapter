@@ -4,23 +4,20 @@ import { GossipStubController } from './gossip.stub.controller';
 import { MonitoringStubController } from './monitoring.stub.controller';
 import { OperationsStubController } from './operations.stub.controller';
 import { PersistentSubscriptionsStubController } from './persistent.stub.controller';
-import { PostgresEventStoreService } from './postgres-event-store.service';
 import { ServerFeaturesController } from './server-features.controller';
-import { StreamsController } from './streams.controller';
+import { StreamsModule } from './streams/streams.module';
 import { UsersStubController } from './users.stub.controller';
-import { AdapterStatsService } from './adapter-stats.service';
 
 @Module({
-  imports: [],
+  imports: [StreamsModule],
   controllers: [
     GossipStubController,
     MonitoringStubController,
     OperationsStubController,
     PersistentSubscriptionsStubController,
     ServerFeaturesController,
-    StreamsController,
     UsersStubController,
   ],
-  providers: [AppService, PostgresEventStoreService, AdapterStatsService],
+  providers: [AppService],
 })
 export class AppModule {}
