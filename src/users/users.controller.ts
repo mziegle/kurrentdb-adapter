@@ -21,7 +21,7 @@ import {
   UsersControllerMethods,
 } from '../interfaces/users';
 import { createStubUserDetails } from '../stub-utils';
-import { logHotPath } from '../debug-log';
+import { logHotPath } from '../shared/debug-log';
 
 @Controller()
 @UsersControllerMethods()

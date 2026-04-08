@@ -4,7 +4,7 @@ import {
   SupportedMethods,
   SupportedMethod,
 } from '../interfaces/serverfeatures';
-import { logHotPath } from '../debug-log';
+import { logHotPath } from '../shared/debug-log';
 
 const GOSSIP_SERVICE_NAME = 'event_store.client.gossip.gossip';
 const MONITORING_SERVICE_NAME = 'event_store.client.monitoring.monitoring';

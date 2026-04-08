@@ -9,12 +9,12 @@ import {
   ReadResp,
   TombstoneReq,
   TombstoneResp,
-} from './interfaces/streams';
+} from '../interfaces/streams';
 import {
   ScavengeResp,
   StartScavengeReq,
   StopScavengeReq,
-} from './interfaces/operations';
+} from '../interfaces/operations';
 
 export const EVENT_STORE_BACKEND = Symbol('EVENT_STORE_BACKEND');
 

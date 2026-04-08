@@ -7,7 +7,7 @@ import {
 import { Metadata } from '@grpc/grpc-js';
 import { Empty } from '../interfaces/shared';
 import { createStubClusterInfo } from '../stub-utils';
-import { logHotPath, summarizeGrpcMetadata } from '../debug-log';
+import { logHotPath, summarizeGrpcMetadata } from '../shared/debug-log';
 
 @Controller()
 @GossipControllerMethods()

@@ -12,7 +12,7 @@ import {
   EVENT_STORE_BACKEND,
   EventStoreBackend,
   type EventStoreStatsSnapshot,
-} from '../event-store-backend';
+} from '../event-store/event-store-backend';
 import { StatsResp } from '../interfaces/monitoring';
 
 type OperationName =

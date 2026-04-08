@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { EVENT_STORE_BACKEND } from '../event-store-backend';
+import { EVENT_STORE_BACKEND } from '../event-store/event-store-backend';
 import { PostgresEventStoreService } from './postgres-event-store.service';
 
 @Module({

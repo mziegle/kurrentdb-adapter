@@ -17,11 +17,14 @@ import {
   TombstoneResp,
 } from '../interfaces/streams';
 import { Observable } from 'rxjs';
-import { EVENT_STORE_BACKEND, EventStoreBackend } from '../event-store-backend';
+import {
+  EVENT_STORE_BACKEND,
+  EventStoreBackend,
+} from '../event-store/event-store-backend';
 import {
   InvalidArgumentServiceError,
   StreamDeletedServiceError,
-} from '../event-store.errors';
+} from '../event-store/event-store.errors';
 import { AdapterStatsService } from '../operations/adapter-stats.service';
 import {
   Metadata,
@@ -31,7 +34,7 @@ import {
   status,
 } from '@grpc/grpc-js';
 import { ServerDuplexStream } from '@grpc/grpc-js';
-import { logHotPath, summarizeGrpcMetadata } from '../debug-log';
+import { logHotPath, summarizeGrpcMetadata } from '../shared/debug-log';
 import { BatchAppendSession } from './batch-append-session';
 
 @Controller()
@@ -253,16 +256,16 @@ export class StreamsController {
       detail: summarizeGrpcMetadata(metadata),
     });
     const operation = this.stats.startOperation('delete');
-    return this.eventStore
-      .delete(request)
-      .then((response) => {
+    return (async () => {
+      try {
+        const response = await this.eventStore.delete(request);
         operation.succeeded();
         return response;
-      })
-      .catch((error: unknown) => {
+      } catch (error: unknown) {
         operation.failed();
         throw new RpcException(this.mapServiceError(error));
-      });
+      }
+    })();
   }
 
   @GrpcMethod('Streams', 'tombstone')
@@ -274,16 +277,16 @@ export class StreamsController {
       detail: summarizeGrpcMetadata(metadata),
     });
     const operation = this.stats.startOperation('tombstone');
-    return this.eventStore
-      .tombstone(request)
-      .then((response) => {
+    return (async () => {
+      try {
+        const response = await this.eventStore.tombstone(request);
         operation.succeeded();
         return response;
-      })
-      .catch((error: unknown) => {
+      } catch (error: unknown) {
         operation.failed();
         throw new RpcException(this.mapServiceError(error));
-      });
+      }
+    })();
   }
 
   @GrpcStreamCall('Streams', 'batchAppend')

@@ -13,7 +13,7 @@ import {
   createInfoResponseBody,
   createHttpGossipResponseBody,
 } from './stub-utils';
-import { logHotPath } from './debug-log';
+import { logHotPath } from './shared/debug-log';
 import { AdapterStatsService } from './operations/adapter-stats.service';
 
 async function bootstrap() {

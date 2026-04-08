@@ -24,7 +24,7 @@ import {
   createPersistentListResponse,
   createPersistentReadStream,
 } from '../stub-utils';
-import { logHotPath } from '../debug-log';
+import { logHotPath } from '../shared/debug-log';
 
 @Controller()
 @PersistentSubscriptionsControllerMethods()

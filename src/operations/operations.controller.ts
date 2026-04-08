@@ -8,9 +8,12 @@ import {
   StopScavengeReq,
 } from '../interfaces/operations';
 import { Empty } from '../interfaces/shared';
-import { logHotPath } from '../debug-log';
+import { logHotPath } from '../shared/debug-log';
 import { AdapterStatsService } from './adapter-stats.service';
-import { EVENT_STORE_BACKEND, EventStoreBackend } from '../event-store-backend';
+import {
+  EVENT_STORE_BACKEND,
+  EventStoreBackend,
+} from '../event-store/event-store-backend';
 
 @Controller()
 @OperationsControllerMethods()
@@ -28,7 +31,7 @@ export class OperationsController implements OperationsControllerContract {
       const response = this.eventStore.startScavenge(request);
       operation.succeeded();
       return response;
-    } catch (error) {
+    } catch (error: unknown) {
       operation.failed();
       throw error;
     }
@@ -41,7 +44,7 @@ export class OperationsController implements OperationsControllerContract {
       const response = this.eventStore.stopScavenge(request);
       operation.succeeded();
       return response;
-    } catch (error) {
+    } catch (error: unknown) {
       operation.failed();
       throw error;
     }

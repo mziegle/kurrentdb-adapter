@@ -38,11 +38,11 @@ import { createInfoResponseBody } from '../stub-utils';
 import {
   EventStoreBackend,
   EventStoreStatsSnapshot,
-} from '../event-store-backend';
+} from '../event-store/event-store-backend';
 import {
   InvalidArgumentServiceError,
   StreamDeletedServiceError,
-} from '../event-store.errors';
+} from '../event-store/event-store.errors';
 
 type PersistedEventRow = {
   global_position: string | number;
