@@ -1566,10 +1566,10 @@ export class PostgresEventStoreService
   }
 
   private async notifyStreamUpdated(streamName: string): Promise<void> {
-    await this.pool.query(
-      'SELECT pg_notify($1, $2)',
-      [PostgresEventStoreService.STREAM_UPDATES_CHANNEL, streamName],
-    );
+    await this.pool.query('SELECT pg_notify($1, $2)', [
+      PostgresEventStoreService.STREAM_UPDATES_CHANNEL,
+      streamName,
+    ]);
   }
 
   private bumpStreamVersion(streamName: string): void {
