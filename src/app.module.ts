@@ -5,7 +5,7 @@ import { MonitoringStubController } from './monitoring.stub.controller';
 import { OperationsModule } from './operations/operations.module';
 import { PersistentSubscriptionsModule } from './persistent-subscriptions/persistent-subscriptions.module';
 import { PostgresModule } from './postgres/postgres.module';
-import { ServerFeaturesController } from './server-features.controller';
+import { ServerFeaturesModule } from './server-features/server-features.module';
 import { StreamsModule } from './streams/streams.module';
 import { UsersModule } from './users/users.module';
 
@@ -15,10 +15,11 @@ import { UsersModule } from './users/users.module';
     PostgresModule,
     OperationsModule,
     PersistentSubscriptionsModule,
+    ServerFeaturesModule,
     StreamsModule,
     UsersModule,
   ],
-  controllers: [MonitoringStubController, ServerFeaturesController],
+  controllers: [MonitoringStubController],
   providers: [AppService],
 })
 export class AppModule {}
