@@ -17,15 +17,15 @@ import {
   ResetPasswordResp,
   UpdateReq,
   UpdateResp,
-  UsersController,
+  UsersController as UsersControllerContract,
   UsersControllerMethods,
-} from './interfaces/users';
-import { createStubUserDetails } from './stub-utils';
-import { logHotPath } from './debug-log';
+} from '../interfaces/users';
+import { createStubUserDetails } from '../stub-utils';
+import { logHotPath } from '../debug-log';
 
 @Controller()
 @UsersControllerMethods()
-export class UsersStubController implements UsersController {
+export class UsersController implements UsersControllerContract {
   create(request: CreateReq): CreateResp {
     void request;
     logHotPath('gRPC Users.Create');

@@ -7,15 +7,20 @@ import { PersistentSubscriptionsStubController } from './persistent.stub.control
 import { PostgresModule } from './postgres/postgres.module';
 import { ServerFeaturesController } from './server-features.controller';
 import { StreamsModule } from './streams/streams.module';
-import { UsersStubController } from './users.stub.controller';
+import { UsersModule } from './users/users.module';
 
 @Module({
-  imports: [GossipModule, PostgresModule, OperationsModule, StreamsModule],
+  imports: [
+    GossipModule,
+    PostgresModule,
+    OperationsModule,
+    StreamsModule,
+    UsersModule,
+  ],
   controllers: [
     MonitoringStubController,
     PersistentSubscriptionsStubController,
     ServerFeaturesController,
-    UsersStubController,
   ],
   providers: [AppService],
 })
