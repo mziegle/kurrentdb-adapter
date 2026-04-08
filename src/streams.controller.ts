@@ -25,13 +25,14 @@ import {
 import { AdapterStatsService } from './adapter-stats.service';
 import {
   Metadata,
-  ServerDuplexStream,
   ServerReadableStream,
   ServerWritableStream,
   sendUnaryData,
   status,
 } from '@grpc/grpc-js';
+import { ServerDuplexStream } from '@grpc/grpc-js';
 import { logHotPath, summarizeGrpcMetadata } from './debug-log';
+import { BatchAppendSession } from './batch-append-session';
 
 @Controller()
 export class StreamsController {
@@ -289,74 +290,25 @@ export class StreamsController {
     logHotPath('gRPC Streams.BatchAppend', {
       detail: summarizeGrpcMetadata(call.metadata),
     });
-    const pendingMessages = new Map<string, BatchAppendReq[]>();
-    let activeWrites = 0;
-    let streamEnded = false;
-    let streamClosed = false;
-    let responseChain = Promise.resolve();
+    const session = new BatchAppendSession(
+      call,
+      (requestGroup, enqueueResponse) =>
+        this.handleBatchAppendGroup(call, requestGroup, enqueueResponse),
+      (correlationId) => this.getBatchAppendCorrelationKey(correlationId),
+      (error) => this.mapServiceError(error),
+    );
 
     call.on('data', (message: BatchAppendReq) => {
-      const correlationKey = this.getBatchAppendCorrelationKey(
-        message.correlationId,
-      );
-      const requestGroup = pendingMessages.get(correlationKey) ?? [];
-      requestGroup.push(message);
-      pendingMessages.set(correlationKey, requestGroup);
-
-      if (!message.isFinal) {
-        return;
-      }
-
-      pendingMessages.delete(correlationKey);
-      activeWrites += 1;
-
-      void this.handleBatchAppendGroup(call, requestGroup, (response) => {
-        responseChain = responseChain
-          .then(async () => {
-            if (call.destroyed) {
-              return;
-            }
-
-            await this.writeBatchAppendResponse(call, response);
-          })
-          .catch((error: unknown) => {
-            if (!call.destroyed) {
-              call.destroy(this.mapServiceError(error));
-            }
-          });
-
-        return responseChain;
-      }).finally(() => {
-        activeWrites -= 1;
-        this.finishBatchAppendStream(
-          call,
-          streamEnded,
-          activeWrites,
-          () => {
-            streamClosed = true;
-          },
-          streamClosed,
-        );
-      });
+      session.onData(message);
     });
-
     call.on('end', () => {
-      streamEnded = true;
-      this.finishBatchAppendStream(
-        call,
-        streamEnded,
-        activeWrites,
-        () => {
-          streamClosed = true;
-        },
-        streamClosed,
-      );
+      session.onEnd();
     });
-
+    call.on('close', () => {
+      session.onClose();
+    });
     call.on('error', (error) => {
-      if (!call.destroyed && !streamEnded) {
-        call.destroy(error);
-      }
+      session.onError(error);
     });
   }
 
@@ -381,37 +333,6 @@ export class StreamsController {
         call.destroy(this.mapServiceError(error));
       }
     }
-  }
-
-  private finishBatchAppendStream(
-    call: ServerDuplexStream<BatchAppendReq, BatchAppendResp>,
-    streamEnded: boolean,
-    activeWrites: number,
-    markClosed: () => void,
-    streamClosed: boolean,
-  ): void {
-    if (!streamEnded || activeWrites > 0 || call.destroyed || streamClosed) {
-      return;
-    }
-
-    markClosed();
-    call.end();
-  }
-
-  private writeBatchAppendResponse(
-    call: ServerDuplexStream<BatchAppendReq, BatchAppendResp>,
-    response: BatchAppendResp,
-  ): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      call.write(response, (error) => {
-        if (error) {
-          reject(error instanceof Error ? error : new Error(String(error)));
-          return;
-        }
-
-        resolve();
-      });
-    });
   }
 
   private getBatchAppendCorrelationKey(
