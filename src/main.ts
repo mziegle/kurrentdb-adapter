@@ -14,7 +14,7 @@ import {
   createHttpGossipResponseBody,
 } from './stub-utils';
 import { logHotPath } from './debug-log';
-import { AdapterStatsService } from './adapter-stats.service';
+import { AdapterStatsService } from './operations/adapter-stats.service';
 
 async function bootstrap() {
   const grpcUrl = process.env.GRPC_URL ?? '0.0.0.0:2113';

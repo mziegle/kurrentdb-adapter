@@ -1,20 +1,20 @@
 import { Controller, Inject } from '@nestjs/common';
 import {
-  OperationsController,
+  OperationsController as OperationsControllerContract,
   OperationsControllerMethods,
   ScavengeResp,
   SetNodePriorityReq,
   StartScavengeReq,
   StopScavengeReq,
-} from './interfaces/operations';
-import { Empty } from './interfaces/shared';
-import { logHotPath } from './debug-log';
+} from '../interfaces/operations';
+import { Empty } from '../interfaces/shared';
+import { logHotPath } from '../debug-log';
 import { AdapterStatsService } from './adapter-stats.service';
-import { EVENT_STORE_BACKEND, EventStoreBackend } from './event-store-backend';
+import { EVENT_STORE_BACKEND, EventStoreBackend } from '../event-store-backend';
 
 @Controller()
 @OperationsControllerMethods()
-export class OperationsStubController implements OperationsController {
+export class OperationsController implements OperationsControllerContract {
   constructor(
     @Inject(EVENT_STORE_BACKEND)
     private readonly eventStore: EventStoreBackend,

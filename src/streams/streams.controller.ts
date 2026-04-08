@@ -22,7 +22,7 @@ import {
   InvalidArgumentServiceError,
   StreamDeletedServiceError,
 } from '../event-store.errors';
-import { AdapterStatsService } from '../adapter-stats.service';
+import { AdapterStatsService } from '../operations/adapter-stats.service';
 import {
   Metadata,
   ServerReadableStream,

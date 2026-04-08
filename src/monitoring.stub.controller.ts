@@ -7,7 +7,7 @@ import {
   StatsResp,
 } from './interfaces/monitoring';
 import { logHotPath } from './debug-log';
-import { AdapterStatsService } from './adapter-stats.service';
+import { AdapterStatsService } from './operations/adapter-stats.service';
 
 @Controller()
 @MonitoringControllerMethods()

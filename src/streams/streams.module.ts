@@ -1,12 +1,11 @@
 import { Module } from '@nestjs/common';
-import { AdapterStatsService } from '../adapter-stats.service';
+import { OperationsModule } from '../operations/operations.module';
 import { PostgresModule } from '../postgres/postgres.module';
 import { StreamsController } from './streams.controller';
 
 @Module({
-  imports: [PostgresModule],
+  imports: [PostgresModule, OperationsModule],
   controllers: [StreamsController],
-  providers: [AdapterStatsService],
-  exports: [AdapterStatsService, PostgresModule],
+  exports: [PostgresModule],
 })
 export class StreamsModule {}

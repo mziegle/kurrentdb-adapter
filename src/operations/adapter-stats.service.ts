@@ -12,8 +12,8 @@ import {
   EVENT_STORE_BACKEND,
   EventStoreBackend,
   type EventStoreStatsSnapshot,
-} from './event-store-backend';
-import { StatsResp } from './interfaces/monitoring';
+} from '../event-store-backend';
+import { StatsResp } from '../interfaces/monitoring';
 
 type OperationName =
   | 'append'
