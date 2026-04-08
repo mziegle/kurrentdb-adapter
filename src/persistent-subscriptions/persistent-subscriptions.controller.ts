@@ -9,7 +9,7 @@ import {
   GetInfoResp,
   ListReq,
   ListResp,
-  PersistentSubscriptionsController,
+  PersistentSubscriptionsController as PersistentSubscriptionsControllerContract,
   PersistentSubscriptionsControllerMethods,
   ReadReq,
   ReadResp,
@@ -17,18 +17,18 @@ import {
   ReplayParkedResp,
   UpdateReq,
   UpdateResp,
-} from './interfaces/persistent';
-import { Empty } from './interfaces/shared';
+} from '../interfaces/persistent';
+import { Empty } from '../interfaces/shared';
 import {
   createPersistentGetInfoResponse,
   createPersistentListResponse,
   createPersistentReadStream,
-} from './stub-utils';
-import { logHotPath } from './debug-log';
+} from '../stub-utils';
+import { logHotPath } from '../debug-log';
 
 @Controller()
 @PersistentSubscriptionsControllerMethods()
-export class PersistentSubscriptionsStubController implements PersistentSubscriptionsController {
+export class PersistentSubscriptionsController implements PersistentSubscriptionsControllerContract {
   create(request: CreateReq): CreateResp {
     void request;
     logHotPath('gRPC PersistentSubscriptions.Create', {
