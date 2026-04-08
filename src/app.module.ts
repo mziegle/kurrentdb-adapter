@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AppService } from './app.service';
-import { GossipStubController } from './gossip.stub.controller';
+import { GossipModule } from './gossip/gossip.module';
 import { MonitoringStubController } from './monitoring.stub.controller';
 import { OperationsModule } from './operations/operations.module';
 import { PersistentSubscriptionsStubController } from './persistent.stub.controller';
@@ -10,9 +10,8 @@ import { StreamsModule } from './streams/streams.module';
 import { UsersStubController } from './users.stub.controller';
 
 @Module({
-  imports: [PostgresModule, OperationsModule, StreamsModule],
+  imports: [GossipModule, PostgresModule, OperationsModule, StreamsModule],
   controllers: [
-    GossipStubController,
     MonitoringStubController,
     PersistentSubscriptionsStubController,
     ServerFeaturesController,
