@@ -78,7 +78,7 @@ npm run cli -- trace --verbose debug --no-default-suppressions
 
 ## Equivalent Environment Variables
 
-Use these only when running the raw script directly:
+Use these to influence the CLI tracer process:
 
 - `TRACE_VERBOSITY=info|debug`
 - `TRACE_USE_DEFAULT_SUPPRESSIONS=0|1`

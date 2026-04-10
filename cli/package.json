@@ -19,6 +19,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@grpc/proto-loader": "^0.7.15",
     "@kurrent/kurrentdb-client": "^1.0.2"
   },
   "devDependencies": {

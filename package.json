@@ -27,7 +27,7 @@
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose down",
     "kurrentdb:up": "docker compose up -d kurrentdb",
-    "kurrentdb:trace": "node scripts/trace-kurrentdb.js",
+    "kurrentdb:trace": "npm run cli -- trace",
     "dev:up": "docker compose up -d postgres kurrentdb",
     "dev:down": "docker compose down",
     "playground:append-read": "ts-node playground/append-and-read.ts",

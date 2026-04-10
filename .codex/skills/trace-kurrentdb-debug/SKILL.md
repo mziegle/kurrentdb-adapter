@@ -7,7 +7,7 @@ description: Trace real KurrentDB traffic and compare it with the adapter in thi
 
 ## Overview
 
-Use this skill when the fastest path is to observe the real node on the wire instead of guessing. The main tool is the repo tracer at [`../../../scripts/trace-kurrentdb.js`](../../../scripts/trace-kurrentdb.js), and the preferred entry point is the repo CLI command `kcli trace`.
+Use this skill when the fastest path is to observe the real node on the wire instead of guessing. The main tool is the repo CLI command `kcli trace`.
 
 Read [`references/trace-workflow.md`](references/trace-workflow.md) for commands, environment variables, and interpretation details.
 
@@ -87,7 +87,7 @@ npm run cli -- trace --suppress-http-paths /gossip,/stats
 npm run cli -- trace --no-default-suppressions
 ```
 
-Only fall back to `npm run kurrentdb:trace` or direct script execution when debugging the tracer itself or when the CLI wrapper is the suspected problem.
+`npm run kurrentdb:trace` is now just a convenience alias for the CLI tracer.
 
 ## Repository-Specific Notes
 
