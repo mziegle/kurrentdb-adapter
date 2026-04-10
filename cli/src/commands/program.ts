@@ -9,6 +9,7 @@ import {
   runReadTest,
   runSubscribeTest,
 } from '../application/test-cases.js';
+import { runTraceProxy } from '../application/trace.js';
 import { runTui } from '../tui/app.js';
 
 interface ParsedArgs {
@@ -91,6 +92,7 @@ function printHelp(): void {
 
 Usage:
   kcli ping [--backend <adapter|reference>] [--json]
+  kcli trace [--proxy-port <port>] [--proxy-host <host>] [--upstream-port <port>] [--upstream-host <host>] [--verbose <info|debug>] [--suppress-http-paths <paths>] [--suppress-http2-frame-types <types>] [--suppress-http1-headers] [--suppress-http1-bodies] [--no-default-suppressions]
   kcli stream read <stream> [--from <revision>] [--limit <count>] [--backend <adapter|reference>] [--json]
   kcli stream append <stream> --type <event-type> --data <json> [--metadata <json>] [--expected-revision <any|no_stream|stream_exists|revision>] [--backend <adapter|reference>] [--json]
   kcli stream tail <stream> [--from <revision>] [--backend <adapter|reference>] [--json]
@@ -124,6 +126,36 @@ export async function runProgram(argv: string[]): Promise<void> {
     } finally {
       await backend.dispose();
     }
+  }
+
+  if (group === 'trace') {
+    await runTraceProxy({
+      proxyHost: parseOption(parsed.positionals, '--proxy-host'),
+      proxyPort: parseOption(parsed.positionals, '--proxy-port'),
+      upstreamHost: parseOption(parsed.positionals, '--upstream-host'),
+      upstreamPort: parseOption(parsed.positionals, '--upstream-port'),
+      verbosity: parseOption(parsed.positionals, '--verbose'),
+      suppressHttpPaths: parseOption(
+        parsed.positionals,
+        '--suppress-http-paths',
+      ),
+      suppressHttp2FrameTypes: parseOption(
+        parsed.positionals,
+        '--suppress-http2-frame-types',
+      ),
+      suppressHttp1Headers: parsed.positionals.includes(
+        '--suppress-http1-headers',
+      ),
+      suppressHttp1Bodies: parsed.positionals.includes(
+        '--suppress-http1-bodies',
+      ),
+      useDefaultSuppressions: parsed.positionals.includes(
+        '--no-default-suppressions',
+      )
+        ? false
+        : undefined,
+    });
+    return;
   }
 
   if (group === 'stream' && action === 'read' && target) {

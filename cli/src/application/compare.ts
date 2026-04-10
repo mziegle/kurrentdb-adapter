@@ -1,4 +1,5 @@
 import type { EventData } from '../domain/types.js';
+import { stringifyCliJson } from '../infrastructure/output/format.js';
 
 export interface ComparisonMismatch {
   index: number;
@@ -27,7 +28,7 @@ function stableStringify(value: unknown): string {
     return 'undefined';
   }
 
-  return JSON.stringify(value);
+  return stringifyCliJson(value);
 }
 
 function maybePushMismatch(

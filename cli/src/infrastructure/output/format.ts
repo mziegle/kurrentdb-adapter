@@ -1,6 +1,18 @@
+function jsonReplacer(_key: string, value: unknown): unknown {
+  if (typeof value === 'bigint') {
+    return value.toString();
+  }
+
+  return value;
+}
+
+export function stringifyCliJson(payload: unknown): string {
+  return JSON.stringify(payload, jsonReplacer, 2);
+}
+
 export function printOutput(payload: unknown, asJson: boolean): void {
   if (asJson) {
-    console.log(JSON.stringify(payload, null, 2));
+    console.log(stringifyCliJson(payload));
     return;
   }
 

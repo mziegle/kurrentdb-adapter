@@ -11,6 +11,7 @@ import {
 } from 'node:net';
 import {
   createInfoResponseBody,
+  createInfoOptionsResponseBody,
   createHttpGossipResponseBody,
 } from './stub-utils';
 import { logHotPath } from './shared/debug-log';
@@ -196,6 +197,11 @@ async function startProbeProxy(
       }
 
       if (tryHandleInfoRequest(clientSocket, chunk)) {
+        interceptedHealthCheck = true;
+        return;
+      }
+
+      if (tryHandleInfoOptionsRequest(clientSocket, chunk)) {
         interceptedHealthCheck = true;
         return;
       }
@@ -401,6 +407,10 @@ function getKnownHttpPath(requestLine: string): string | undefined {
     return 'GET /info';
   }
 
+  if (requestLine.startsWith('GET /info/options HTTP/1.1')) {
+    return 'GET /info/options';
+  }
+
   if (requestLine.startsWith('GET /gossip HTTP/1.1')) {
     return 'GET /gossip';
   }
@@ -454,6 +464,28 @@ function tryHandleInfoRequest(clientSocket: Socket, chunk: Buffer): boolean {
   writeHttpResponse(
     clientSocket,
     'GET /info',
+    200,
+    'OK',
+    'application/json; charset=utf-8',
+    body,
+  );
+  return true;
+}
+
+function tryHandleInfoOptionsRequest(
+  clientSocket: Socket,
+  chunk: Buffer,
+): boolean {
+  const requestLine = chunk.subarray(0, 64).toString('utf8');
+
+  if (!requestLine.startsWith('GET /info/options HTTP/1.1')) {
+    return false;
+  }
+
+  const body = createInfoOptionsResponseBody();
+  writeHttpResponse(
+    clientSocket,
+    'GET /info/options',
     200,
     'OK',
     'application/json; charset=utf-8',

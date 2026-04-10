@@ -209,6 +209,121 @@ export function createInfoResponseBody(): string {
   });
 }
 
+export function createInfoOptionsResponseBody(): string {
+  return JSON.stringify([
+    createInfoOption('Help', 'Show help.', 'ApplicationOptions', 'False', {
+      type: 'boolean',
+    }),
+    createInfoOption(
+      'Version',
+      'Show version.',
+      'ApplicationOptions',
+      'False',
+      { type: 'boolean' },
+    ),
+    createInfoOption(
+      'Config',
+      'Configuration files.',
+      'ApplicationOptions',
+      '/etc/kurrentdb/kurrentdb.conf',
+      { type: 'string' },
+    ),
+    createInfoOption(
+      'WhatIf',
+      'Print effective configuration to console and then exit.',
+      'ApplicationOptions',
+      'False',
+      { type: 'boolean' },
+    ),
+    createInfoOption(
+      'AllowUnknownOptions',
+      'Allows KurrentDB to run with unknown configuration options present.',
+      'ApplicationOptions',
+      'False',
+      { type: 'boolean' },
+    ),
+    createInfoOption(
+      'DisableHttpCaching',
+      'Disable HTTP caching.',
+      'ApplicationOptions',
+      'False',
+      { type: 'boolean' },
+    ),
+    createInfoOption(
+      'StatsPeriodSec',
+      'The number of seconds between statistics gathers.',
+      'ApplicationOptions',
+      '30',
+      { type: 'integer', 'x-unit': 's' },
+    ),
+    createInfoOption(
+      'WorkerThreads',
+      "The number of threads to use for pool of worker services. Set to '0' to scale automatically (Default)",
+      'ApplicationOptions',
+      '0',
+      { type: 'integer' },
+      'This setting no longer has an effect. The workers automatically scale as necessary',
+    ),
+    createInfoOption(
+      'EnableHistograms',
+      'Enables the tracking of various histograms in the backend, typically only used for debugging, etc.',
+      'ApplicationOptions',
+      'False',
+      { type: 'boolean' },
+      'The EnableHistograms setting has been deprecated as of version 24.10.0 and currently has no effect. Please contact Kurrent if this feature is of interest to you.',
+    ),
+    createInfoOption(
+      'LogHttpRequests',
+      'Log Http Requests and Responses before processing them.',
+      'ApplicationOptions',
+      'False',
+      { type: 'boolean' },
+    ),
+    createInfoOption(
+      'LogFailedAuthenticationAttempts',
+      'Log the failed authentication attempts.',
+      'ApplicationOptions',
+      'False',
+      { type: 'boolean' },
+    ),
+    createInfoOption(
+      'SkipIndexScanOnReads',
+      'Skip Index Scan on Reads. This skips the index scan which was used to stop reading duplicates.',
+      'ApplicationOptions',
+      'False',
+      { type: 'boolean' },
+    ),
+    createInfoOption(
+      'MaxAppendSize',
+      'The maximum size of appends, in bytes. This is the total size of all records in the append request. May not exceed 256MB.',
+      'ApplicationOptions',
+      '268435456',
+      { type: 'integer', 'x-unit': 'bytes' },
+    ),
+    createInfoOption(
+      'NodeIp',
+      'IP address advertised by the node.',
+      'ClusterOptions',
+      getNodeAddress(),
+      { type: 'string' },
+    ),
+    createInfoOption(
+      'NodePort',
+      'TCP/HTTP port advertised by the node.',
+      'ClusterOptions',
+      String(getNodePort()),
+      { type: 'integer' },
+    ),
+    createInfoOption(
+      'Insecure',
+      'Run without TLS and certificate authentication.',
+      'SecurityOptions',
+      'True',
+      { type: 'boolean' },
+    ),
+  ]);
+}
+
 export function createHttpGossipResponseBody(): string {
   return JSON.stringify({
     serverIp: getNodeAddress(),
@@ -241,6 +356,33 @@ export function createHttpGossipResponseBody(): string {
       },
     ],
   });
+}
+
+function createInfoOption(
+  name: string,
+  description: string,
+  group: string,
+  value: string,
+  schema: Record<string, string>,
+  deprecationMessage: string | null = null,
+): {
+  name: string;
+  description: string;
+  group: string;
+  value: string;
+  configurationSource: string;
+  deprecationMessage: string | null;
+  schema: Record<string, string>;
+} {
+  return {
+    name,
+    description,
+    group,
+    value,
+    configurationSource: '<DEFAULT>',
+    deprecationMessage,
+    schema,
+  };
 }
 
 export function createHttpStatsResponseBody(): string {
