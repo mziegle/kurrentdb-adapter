@@ -4,7 +4,8 @@ import {
   SupportedMethods,
   SupportedMethod,
 } from '../interfaces/serverfeatures';
-import { logHotPath } from '../shared/debug-log';
+import { Metadata } from '@grpc/grpc-js';
+import { extractGrpcMetadata, logHotPath } from '../shared/debug-log';
 
 const GOSSIP_SERVICE_NAME = 'event_store.client.gossip.gossip';
 const MONITORING_SERVICE_NAME = 'event_store.client.monitoring.monitoring';
@@ -19,7 +20,7 @@ const USERS_SERVICE_NAME = 'event_store.client.users.users';
 @Controller()
 export class ServerFeaturesController {
   @GrpcMethod('ServerFeatures', 'getSupportedMethods')
-  getSupportedMethods(): SupportedMethods {
+  getSupportedMethods(_: unknown, metadata?: Metadata): SupportedMethods {
     const response = {
       eventStoreServerVersion: '24.0.0',
       methods: [
@@ -101,7 +102,14 @@ export class ServerFeaturesController {
     };
 
     logHotPath('gRPC ServerFeatures.GetSupportedMethods', {
-      detail: `version=${response.eventStoreServerVersion} methods=${response.methods.length}`,
+      summary: `version=${response.eventStoreServerVersion} methods=${response.methods.length}`,
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        responsePreview: {
+          eventStoreServerVersion: response.eventStoreServerVersion,
+          methodCount: response.methods.length,
+        },
+      },
     });
     return response;
   }

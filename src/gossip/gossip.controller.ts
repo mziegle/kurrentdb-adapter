@@ -7,7 +7,11 @@ import {
 import { Metadata } from '@grpc/grpc-js';
 import { Empty } from '../interfaces/shared';
 import { createStubClusterInfo } from '../stub-utils';
-import { logHotPath, summarizeGrpcMetadata } from '../shared/debug-log';
+import {
+  extractGrpcMetadata,
+  logHotPath,
+  summarizeGrpcMetadata,
+} from '../shared/debug-log';
 
 @Controller()
 @GossipControllerMethods()
@@ -15,7 +19,11 @@ export class GossipController implements GossipControllerContract {
   read(request: Empty, metadata?: Metadata): ClusterInfo {
     void request;
     logHotPath('gRPC Gossip.Read', {
-      detail: summarizeGrpcMetadata(metadata),
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
     });
     return createStubClusterInfo();
   }

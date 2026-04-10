@@ -8,13 +8,17 @@ import {
   StopScavengeReq,
 } from '../interfaces/operations';
 import { Empty } from '../interfaces/shared';
-import { logHotPath } from '../shared/debug-log';
 import { AdapterStatsService } from './adapter-stats.service';
 import {
   EVENT_STORE_BACKEND,
   EventStoreBackend,
 } from '../event-store/event-store-backend';
-
+import { Metadata } from '@grpc/grpc-js';
+import {
+  extractGrpcMetadata,
+  logHotPath,
+  summarizeGrpcMetadata,
+} from '../shared/debug-log';
 @Controller()
 @OperationsControllerMethods()
 export class OperationsController implements OperationsControllerContract {
@@ -24,8 +28,14 @@ export class OperationsController implements OperationsControllerContract {
     private readonly stats: AdapterStatsService,
   ) {}
 
-  startScavenge(request: StartScavengeReq): ScavengeResp {
-    logHotPath('gRPC Operations.StartScavenge');
+  startScavenge(request: StartScavengeReq, metadata?: Metadata): ScavengeResp {
+    logHotPath('gRPC Operations.StartScavenge', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     const operation = this.stats.startOperation('startScavenge');
     try {
       const response = this.eventStore.startScavenge(request);
@@ -37,8 +47,14 @@ export class OperationsController implements OperationsControllerContract {
     }
   }
 
-  stopScavenge(request: StopScavengeReq): ScavengeResp {
-    logHotPath('gRPC Operations.StopScavenge');
+  stopScavenge(request: StopScavengeReq, metadata?: Metadata): ScavengeResp {
+    logHotPath('gRPC Operations.StopScavenge', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     const operation = this.stats.startOperation('stopScavenge');
     try {
       const response = this.eventStore.stopScavenge(request);
@@ -50,33 +66,58 @@ export class OperationsController implements OperationsControllerContract {
     }
   }
 
-  shutdown(request: Empty): Empty {
-    void request;
-    logHotPath('gRPC Operations.Shutdown');
+  shutdown(request: Empty, metadata?: Metadata): Empty {
+    logHotPath('gRPC Operations.Shutdown', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 
-  mergeIndexes(request: Empty): Empty {
-    void request;
-    logHotPath('gRPC Operations.MergeIndexes');
+  mergeIndexes(request: Empty, metadata?: Metadata): Empty {
+    logHotPath('gRPC Operations.MergeIndexes', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 
-  resignNode(request: Empty): Empty {
-    void request;
-    logHotPath('gRPC Operations.ResignNode');
+  resignNode(request: Empty, metadata?: Metadata): Empty {
+    logHotPath('gRPC Operations.ResignNode', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 
-  setNodePriority(request: SetNodePriorityReq): Empty {
-    void request;
-    logHotPath('gRPC Operations.SetNodePriority');
+  setNodePriority(request: SetNodePriorityReq, metadata?: Metadata): Empty {
+    logHotPath('gRPC Operations.SetNodePriority', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 
-  restartPersistentSubscriptions(request: Empty): Empty {
-    void request;
-    logHotPath('gRPC Operations.RestartPersistentSubscriptions');
+  restartPersistentSubscriptions(request: Empty, metadata?: Metadata): Empty {
+    logHotPath('gRPC Operations.RestartPersistentSubscriptions', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 }

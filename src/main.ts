@@ -15,6 +15,7 @@ import {
 } from './stub-utils';
 import { logHotPath } from './shared/debug-log';
 import { AdapterStatsService } from './operations/adapter-stats.service';
+import { appLogger } from './shared/logger';
 
 async function bootstrap() {
   const grpcUrl = process.env.GRPC_URL ?? '0.0.0.0:2113';
@@ -58,13 +59,18 @@ async function bootstrap() {
   const stats = app.get(AdapterStatsService);
   const proxyServer = await startProbeProxy(grpcUrl, internalGrpcUrl, stats);
   const proxyAddress = proxyServer.address() as AddressInfo;
-  console.info(
-    `Probe proxy listening on ${proxyAddress.address}:${proxyAddress.port} and forwarding to ${internalGrpcUrl}`,
+  appLogger.info(
+    {
+      event: 'probe_proxy_started',
+      listenAddress: `${proxyAddress.address}:${proxyAddress.port}`,
+      upstreamAddress: internalGrpcUrl,
+    },
+    'Probe proxy listening',
   );
 }
 
 bootstrap().catch((err) => {
-  console.error('Error during application bootstrap:', err);
+  appLogger.error({ err }, 'Error during application bootstrap');
   process.exit(1);
 });
 
@@ -115,17 +121,67 @@ async function startProbeProxy(
 
   const server = createServer((clientSocket) => {
     const upstreamSocket = new Socket();
+    const pendingUpstreamWrites: Buffer[] = [];
     let loggedFirstChunk = false;
     let upstreamConnected = false;
+    let upstreamConnecting = false;
     let interceptedHealthCheck = false;
+    let proxyClosed = false;
 
     const connectUpstream = () => {
-      if (upstreamConnected || interceptedHealthCheck) {
+      if (
+        upstreamConnected ||
+        upstreamConnecting ||
+        interceptedHealthCheck ||
+        proxyClosed
+      ) {
         return;
       }
 
-      upstreamConnected = true;
+      upstreamConnecting = true;
       upstreamSocket.connect(internalEndpoint.port, internalEndpoint.host);
+    };
+
+    const flushPendingUpstreamWrites = () => {
+      if (!upstreamConnected || proxyClosed || upstreamSocket.destroyed) {
+        return;
+      }
+
+      while (pendingUpstreamWrites.length > 0) {
+        const chunk = pendingUpstreamWrites.shift();
+        if (!chunk) {
+          continue;
+        }
+
+        if (!safeWrite(upstreamSocket, chunk)) {
+          pendingUpstreamWrites.unshift(chunk);
+          return;
+        }
+      }
+    };
+
+    const closeProxy = (error?: Error) => {
+      if (proxyClosed) {
+        return;
+      }
+
+      proxyClosed = true;
+
+      if (!clientSocket.destroyed) {
+        if (error) {
+          clientSocket.destroy(error);
+        } else {
+          clientSocket.end();
+        }
+      }
+
+      if (!upstreamSocket.destroyed) {
+        if (error) {
+          upstreamSocket.destroy(error);
+        } else {
+          upstreamSocket.end();
+        }
+      }
     };
 
     clientSocket.on('data', (chunk) => {
@@ -160,29 +216,53 @@ async function startProbeProxy(
       }
 
       connectUpstream();
-      upstreamSocket.write(chunk);
+      if (!upstreamConnected) {
+        pendingUpstreamWrites.push(Buffer.from(chunk));
+        return;
+      }
+
+      if (!safeWrite(upstreamSocket, chunk)) {
+        pendingUpstreamWrites.push(Buffer.from(chunk));
+      }
+    });
+
+    upstreamSocket.on('connect', () => {
+      upstreamConnecting = false;
+      upstreamConnected = true;
+      flushPendingUpstreamWrites();
     });
 
     upstreamSocket.on('data', (chunk) => {
-      clientSocket.write(chunk);
+      if (!safeWrite(clientSocket, chunk)) {
+        closeProxy();
+      }
     });
 
     clientSocket.on('end', () => {
-      upstreamSocket.end();
+      closeProxy();
     });
 
     upstreamSocket.on('end', () => {
-      clientSocket.end();
+      closeProxy();
+    });
+
+    clientSocket.on('close', () => {
+      proxyClosed = true;
+    });
+
+    upstreamSocket.on('close', () => {
+      proxyClosed = true;
     });
 
     clientSocket.on('error', (error) => {
-      console.warn(`Probe proxy client error: ${error.message}`);
-      upstreamSocket.destroy(error);
+      logProbeSocketError('Probe proxy client error', error);
+      closeProxy(error);
     });
 
     upstreamSocket.on('error', (error) => {
-      console.warn(`Probe proxy upstream error: ${error.message}`);
-      clientSocket.destroy(error);
+      upstreamConnecting = false;
+      logProbeSocketError('Probe proxy upstream error', error);
+      closeProxy(error);
     });
   });
 
@@ -197,6 +277,32 @@ async function startProbeProxy(
   return server;
 }
 
+function safeWrite(socket: Socket, chunk: Buffer | string): boolean {
+  if (socket.destroyed || socket.writableEnded) {
+    return false;
+  }
+
+  socket.write(chunk);
+  return true;
+}
+
+function logProbeSocketError(message: string, error: Error): void {
+  if (isBenignSocketCloseError(error)) {
+    appLogger.debug({ err: error }, message);
+    return;
+  }
+
+  appLogger.warn({ err: error }, message);
+}
+
+function isBenignSocketCloseError(error: Error & { code?: string }): boolean {
+  return (
+    error.code === 'ERR_SOCKET_CLOSED' ||
+    error.code === 'EPIPE' ||
+    error.code === 'ECONNRESET'
+  );
+}
+
 function logIncomingProbe(clientSocket: Socket, chunk: Buffer): void {
   const remoteAddress = `${clientSocket.remoteAddress ?? 'unknown'}:${clientSocket.remotePort ?? 0}`;
   const requestLine = chunk.toString('utf8').split('\r\n', 1)[0] ?? '';
@@ -204,13 +310,39 @@ function logIncomingProbe(clientSocket: Socket, chunk: Buffer): void {
 
   if (knownHttpPath) {
     logHotPath(`HTTP ${knownHttpPath}`, {
-      detail: `from ${remoteAddress}`,
+      summary: `from ${remoteAddress}`,
+      trace: {
+        remoteAddress,
+        requestLine,
+      },
     });
     return;
   }
 
   if (isHttp1RequestLine(requestLine)) {
-    console.info(`[debug] HTTP unhandled ${requestLine} from ${remoteAddress}`);
+    appLogger.info(
+      {
+        event: 'incoming_request',
+        requestLabel: 'HTTP unhandled',
+        summary: `${requestLine} from ${remoteAddress}`,
+      },
+      'HTTP unhandled request',
+    );
+    appLogger.trace(
+      {
+        event: 'incoming_request',
+        requestLabel: 'HTTP unhandled',
+        trace: {
+          remoteAddress,
+          requestLine,
+          rawChunk: {
+            utf8Preview: chunk.subarray(0, 256).toString('utf8'),
+            hexPreview: chunk.subarray(0, 64).toString('hex'),
+          },
+        },
+      },
+      'HTTP unhandled request full details',
+    );
     return;
   }
 
@@ -222,8 +354,23 @@ function logIncomingProbe(clientSocket: Socket, chunk: Buffer): void {
   const hexPreview = chunk.subarray(0, 24).toString('hex');
   const protocolGuess = guessProtocol(chunk);
 
-  console.info(
-    `[probe] first bytes from ${remoteAddress} protocol=${protocolGuess} ascii="${asciiPreview}" hex=${hexPreview}`,
+  appLogger.info(
+    {
+      event: 'probe_request',
+      remoteAddress,
+      protocolGuess,
+    },
+    'Probe proxy received unknown request',
+  );
+  appLogger.trace(
+    {
+      event: 'probe_request',
+      remoteAddress,
+      protocolGuess,
+      asciiPreview,
+      hexPreview,
+    },
+    'Probe proxy request details',
   );
 }
 
@@ -358,8 +505,7 @@ function tryHandleStatsRequest(
       );
     })
     .catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(`Failed to build /stats response: ${message}`);
+      appLogger.warn({ err: error }, 'Failed to build /stats response');
       writeHttpResponse(
         clientSocket,
         'GET /stats',
@@ -402,8 +548,14 @@ function writeHttpResponse(
   body: string,
 ): void {
   const contentLength = Buffer.byteLength(body, 'utf8');
-  console.info(
-    `[debug] HTTP response ${path} status=${statusCode} bytes=${contentLength}`,
+  appLogger.debug(
+    {
+      event: 'http_response',
+      path,
+      statusCode,
+      bytes: contentLength,
+    },
+    'HTTP response sent',
   );
   clientSocket.write(
     [

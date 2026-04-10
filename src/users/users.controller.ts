@@ -21,55 +21,107 @@ import {
   UsersControllerMethods,
 } from '../interfaces/users';
 import { createStubUserDetails } from '../stub-utils';
-import { logHotPath } from '../shared/debug-log';
+import { Metadata } from '@grpc/grpc-js';
+import {
+  extractGrpcMetadata,
+  logHotPath,
+  summarizeGrpcMetadata,
+} from '../shared/debug-log';
 
 @Controller()
 @UsersControllerMethods()
 export class UsersController implements UsersControllerContract {
-  create(request: CreateReq): CreateResp {
-    void request;
-    logHotPath('gRPC Users.Create');
+  create(request: CreateReq, metadata?: Metadata): CreateResp {
+    logHotPath('gRPC Users.Create', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 
-  update(request: UpdateReq): UpdateResp {
-    void request;
-    logHotPath('gRPC Users.Update');
+  update(request: UpdateReq, metadata?: Metadata): UpdateResp {
+    logHotPath('gRPC Users.Update', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 
-  delete(request: DeleteReq): DeleteResp {
-    void request;
-    logHotPath('gRPC Users.Delete');
+  delete(request: DeleteReq, metadata?: Metadata): DeleteResp {
+    logHotPath('gRPC Users.Delete', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 
-  disable(request: DisableReq): DisableResp {
-    void request;
-    logHotPath('gRPC Users.Disable');
+  disable(request: DisableReq, metadata?: Metadata): DisableResp {
+    logHotPath('gRPC Users.Disable', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 
-  enable(request: EnableReq): EnableResp {
-    void request;
-    logHotPath('gRPC Users.Enable');
+  enable(request: EnableReq, metadata?: Metadata): EnableResp {
+    logHotPath('gRPC Users.Enable', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 
-  details(request: DetailsReq): Observable<DetailsResp> {
-    logHotPath('gRPC Users.Details');
+  details(request: DetailsReq, metadata?: Metadata): Observable<DetailsResp> {
+    logHotPath('gRPC Users.Details', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return of(createStubUserDetails(request));
   }
 
-  changePassword(request: ChangePasswordReq): ChangePasswordResp {
-    void request;
-    logHotPath('gRPC Users.ChangePassword');
+  changePassword(
+    request: ChangePasswordReq,
+    metadata?: Metadata,
+  ): ChangePasswordResp {
+    logHotPath('gRPC Users.ChangePassword', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 
-  resetPassword(request: ResetPasswordReq): ResetPasswordResp {
-    void request;
-    logHotPath('gRPC Users.ResetPassword');
+  resetPassword(
+    request: ResetPasswordReq,
+    metadata?: Metadata,
+  ): ResetPasswordResp {
+    logHotPath('gRPC Users.ResetPassword', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 }

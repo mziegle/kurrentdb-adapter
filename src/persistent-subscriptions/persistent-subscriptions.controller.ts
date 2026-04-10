@@ -24,62 +24,133 @@ import {
   createPersistentListResponse,
   createPersistentReadStream,
 } from '../stub-utils';
-import { logHotPath } from '../shared/debug-log';
+import { Metadata } from '@grpc/grpc-js';
+import {
+  extractGrpcMetadata,
+  logHotPath,
+  summarizeGrpcMetadata,
+} from '../shared/debug-log';
 
 @Controller()
 @PersistentSubscriptionsControllerMethods()
 export class PersistentSubscriptionsController implements PersistentSubscriptionsControllerContract {
-  create(request: CreateReq): CreateResp {
-    void request;
+  create(request: CreateReq, metadata?: Metadata): CreateResp {
     logHotPath('gRPC PersistentSubscriptions.Create', {
-      detail: this.summarizeCreateOrUpdateRequest(request.options?.groupName),
+      summary:
+        [
+          summarizeGrpcMetadata(metadata),
+          this.summarizeCreateOrUpdateRequest(request.options?.groupName),
+        ]
+          .filter(Boolean)
+          .join(' ') || undefined,
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
     });
     return {};
   }
 
-  update(request: UpdateReq): UpdateResp {
+  update(request: UpdateReq, metadata?: Metadata): UpdateResp {
     logHotPath('gRPC PersistentSubscriptions.Update', {
-      detail: this.summarizeCreateOrUpdateRequest(request.options?.groupName),
+      summary:
+        [
+          summarizeGrpcMetadata(metadata),
+          this.summarizeCreateOrUpdateRequest(request.options?.groupName),
+        ]
+          .filter(Boolean)
+          .join(' ') || undefined,
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
     });
     return {};
   }
 
-  delete(request: DeleteReq): DeleteResp {
+  delete(request: DeleteReq, metadata?: Metadata): DeleteResp {
     logHotPath('gRPC PersistentSubscriptions.Delete', {
-      detail: this.summarizeGroupName(request.options?.groupName),
+      summary:
+        [
+          summarizeGrpcMetadata(metadata),
+          this.summarizeGroupName(request.options?.groupName),
+        ]
+          .filter(Boolean)
+          .join(' ') || undefined,
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
     });
     return {};
   }
 
-  read(request: Observable<ReadReq>): Observable<ReadResp> {
-    void request;
-    logHotPath('gRPC PersistentSubscriptions.Read');
+  read(
+    request: Observable<ReadReq>,
+    metadata?: Metadata,
+  ): Observable<ReadResp> {
+    logHotPath('gRPC PersistentSubscriptions.Read', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request: 'observable-stream',
+      },
+    });
     return createPersistentReadStream();
   }
 
-  getInfo(request: GetInfoReq): GetInfoResp {
+  getInfo(request: GetInfoReq, metadata?: Metadata): GetInfoResp {
     logHotPath('gRPC PersistentSubscriptions.GetInfo', {
-      detail: this.summarizeGetInfoRequest(request),
+      summary: [
+        summarizeGrpcMetadata(metadata),
+        this.summarizeGetInfoRequest(request),
+      ]
+        .filter(Boolean)
+        .join(' '),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
     });
     return createPersistentGetInfoResponse(request);
   }
 
-  replayParked(request: ReplayParkedReq): ReplayParkedResp {
-    void request;
-    logHotPath('gRPC PersistentSubscriptions.ReplayParked');
+  replayParked(
+    request: ReplayParkedReq,
+    metadata?: Metadata,
+  ): ReplayParkedResp {
+    logHotPath('gRPC PersistentSubscriptions.ReplayParked', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 
-  list(request: ListReq): ListResp {
+  list(request: ListReq, metadata?: Metadata): ListResp {
     logHotPath('gRPC PersistentSubscriptions.List', {
-      detail: this.summarizeListRequest(request),
+      summary:
+        [summarizeGrpcMetadata(metadata), this.summarizeListRequest(request)]
+          .filter(Boolean)
+          .join(' ') || undefined,
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
     });
     return createPersistentListResponse();
   }
 
-  restartSubsystem(request: Empty): Empty {
-    void request;
-    logHotPath('gRPC PersistentSubscriptions.RestartSubsystem');
+  restartSubsystem(request: Empty, metadata?: Metadata): Empty {
+    logHotPath('gRPC PersistentSubscriptions.RestartSubsystem', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return {};
   }
 

@@ -35,6 +35,7 @@ import { Code } from '../interfaces/code';
 import { Any } from '../interfaces/google/protobuf/any';
 import { Timestamp } from '../interfaces/google/protobuf/timestamp';
 import { createInfoResponseBody } from '../stub-utils';
+import { appLogger } from '../shared/logger';
 import {
   EventStoreBackend,
   EventStoreStatsSnapshot,
@@ -120,6 +121,8 @@ export class PostgresEventStoreService
   private static readonly STREAMS_STREAM = '$streams';
   private static readonly SCAVENGES_STREAM = '$scavenges';
   private static readonly SCAVENGE_BATCH_SIZE = 500;
+  private static readonly SCHEMA_INIT_LOCK_KEY = 482734921;
+  private static readonly STREAM_WRITE_LOCK_NAMESPACE = 482734922;
   private readonly pool = new Pool(this.getPoolConfig());
   private listenClient: PoolClient | null = null;
   private readonly streamVersions = new Map<string, number>();
@@ -127,7 +130,28 @@ export class PostgresEventStoreService
   private readonly activeScavenges = new Map<string, ActiveScavenge>();
 
   async onModuleInit(): Promise<void> {
-    await this.pool.query(`
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('SELECT pg_advisory_lock($1)', [
+        PostgresEventStoreService.SCHEMA_INIT_LOCK_KEY,
+      ]);
+      await this.initializeSchema(client);
+    } finally {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1)', [
+          PostgresEventStoreService.SCHEMA_INIT_LOCK_KEY,
+        ]);
+      } finally {
+        client.release();
+      }
+    }
+
+    await this.initializeStreamUpdateListener();
+  }
+
+  private async initializeSchema(client: PoolClient): Promise<void> {
+    await client.query(`
       CREATE TABLE IF NOT EXISTS stream_events (
         global_position BIGSERIAL PRIMARY KEY,
         stream_name TEXT NOT NULL,
@@ -142,27 +166,27 @@ export class PostgresEventStoreService
       )
     `);
 
-    await this.pool.query(`
+    await client.query(`
       ALTER TABLE stream_events
       ADD COLUMN IF NOT EXISTS stream_generation BIGINT NOT NULL DEFAULT 0
     `);
 
-    await this.pool.query(`
+    await client.query(`
       ALTER TABLE stream_events
       DROP CONSTRAINT IF EXISTS stream_events_stream_name_stream_revision_key
     `);
 
-    await this.pool.query(`
+    await client.query(`
       CREATE INDEX IF NOT EXISTS idx_stream_events_stream_revision
       ON stream_events (stream_name, stream_generation, stream_revision)
     `);
 
-    await this.pool.query(`
+    await client.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_stream_events_stream_generation_revision_unique
       ON stream_events (stream_name, stream_generation, stream_revision)
     `);
 
-    await this.pool.query(`
+    await client.query(`
       CREATE TABLE IF NOT EXISTS tombstoned_streams (
         stream_name TEXT PRIMARY KEY,
         tombstoned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -170,7 +194,7 @@ export class PostgresEventStoreService
       )
     `);
 
-    await this.pool.query(`
+    await client.query(`
       CREATE TABLE IF NOT EXISTS stream_retention_policies (
         stream_name TEXT PRIMARY KEY,
         current_generation BIGINT NOT NULL DEFAULT 0,
@@ -182,22 +206,20 @@ export class PostgresEventStoreService
       )
     `);
 
-    await this.pool.query(`
+    await client.query(`
       ALTER TABLE stream_retention_policies
       ADD COLUMN IF NOT EXISTS current_generation BIGINT NOT NULL DEFAULT 0
     `);
 
-    await this.pool.query(`
+    await client.query(`
       ALTER TABLE stream_retention_policies
       ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL
     `);
 
-    await this.pool.query(`
+    await client.query(`
       ALTER TABLE stream_retention_policies
       ADD COLUMN IF NOT EXISTS max_age BIGINT NULL
     `);
-
-    await this.initializeStreamUpdateListener();
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -287,11 +309,11 @@ export class PostgresEventStoreService
       proposedMessages,
     );
 
-    await this.ensureStreamIsNotTombstoned(streamName);
-
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      await this.lockStreamTransaction(client, streamName);
+      await this.ensureStreamIsNotTombstoned(streamName, client);
 
       const streamState = await this.getStreamRetentionPolicy(
         client,
@@ -377,7 +399,7 @@ export class PostgresEventStoreService
       await client.query('COMMIT');
 
       if (proposedMessages.length > 0) {
-        await this.notifyStreamUpdated(streamName);
+        await this.notifyStreamUpdated(streamName, client);
       }
 
       if (proposedMessages.length === 0) {
@@ -838,7 +860,7 @@ export class PostgresEventStoreService
 
       await client.query('COMMIT');
 
-      await this.notifyStreamUpdated(streamName);
+      await this.notifyStreamUpdated(streamName, client);
 
       const lastPosition = this.toNumber(lastEvent.rows[0].global_position);
 
@@ -967,7 +989,7 @@ export class PostgresEventStoreService
 
       await client.query('COMMIT');
 
-      await this.notifyStreamUpdated(streamName);
+      await this.notifyStreamUpdated(streamName, client);
 
       return {
         position: {
@@ -1249,10 +1271,13 @@ export class PostgresEventStoreService
     );
 
     if (result.rows.length === 0) {
-      console.info(
-        `[debug] ReadAll snapshot empty boundary=${boundary === null ? 'none' : String(boundary)} filter=${
-          options.filter ? 'yes' : 'no'
-        } returning=caughtUp`,
+      appLogger.debug(
+        {
+          event: 'read_all_empty_snapshot',
+          boundary: boundary === null ? 'none' : String(boundary),
+          filterApplied: Boolean(options.filter),
+        },
+        'ReadAll snapshot empty, returning caughtUp',
       );
       return [
         {
@@ -1553,8 +1578,11 @@ export class PostgresEventStoreService
     );
   }
 
-  private async notifyStreamUpdated(streamName: string): Promise<void> {
-    await this.pool.query('SELECT pg_notify($1, $2)', [
+  private async notifyStreamUpdated(
+    streamName: string,
+    client: PoolClient | Pool = this.pool,
+  ): Promise<void> {
+    await client.query('SELECT pg_notify($1, $2)', [
       PostgresEventStoreService.STREAM_UPDATES_CHANNEL,
       streamName,
     ]);
@@ -1639,10 +1667,23 @@ export class PostgresEventStoreService
     return this.toNumber(result.rows[0].global_position);
   }
 
-  private async ensureStreamIsNotTombstoned(streamName: string): Promise<void> {
-    if (await this.isStreamTombstoned(streamName)) {
+  private async ensureStreamIsNotTombstoned(
+    streamName: string,
+    client: PoolClient | Pool = this.pool,
+  ): Promise<void> {
+    if (await this.isStreamTombstoned(streamName, client)) {
       throw new StreamDeletedServiceError(streamName);
     }
+  }
+
+  private async lockStreamTransaction(
+    client: PoolClient,
+    streamName: string,
+  ): Promise<void> {
+    await client.query('SELECT pg_advisory_xact_lock($1, hashtext($2))', [
+      PostgresEventStoreService.STREAM_WRITE_LOCK_NAMESPACE,
+      streamName,
+    ]);
   }
 
   private async runScavenge(

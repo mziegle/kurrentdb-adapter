@@ -34,7 +34,13 @@ import {
   status,
 } from '@grpc/grpc-js';
 import { ServerDuplexStream } from '@grpc/grpc-js';
-import { logHotPath, summarizeGrpcMetadata } from '../shared/debug-log';
+import {
+  extractGrpcMetadata,
+  logHotPath,
+  logStreamRequestMessage,
+  summarizeGrpcMetadata,
+} from '../shared/debug-log';
+import { appLogger } from '../shared/logger';
 import { BatchAppendSession } from './batch-append-session';
 
 @Controller()
@@ -52,12 +58,16 @@ export class StreamsController {
     call?: ServerWritableStream<ReadReq, ReadResp>,
   ): Observable<ReadResp> {
     logHotPath('gRPC Streams.Read', {
-      detail: [
+      summary: [
         summarizeGrpcMetadata(metadata),
         this.summarizeReadRequest(request),
       ]
         .filter(Boolean)
         .join(' '),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
     });
     const operation = this.stats.startOperation('read');
     return new Observable<ReadResp>((subscriber) => {
@@ -93,10 +103,14 @@ export class StreamsController {
           }
 
           const responses = await this.eventStore.read(request);
-          console.info(
-            `[debug] gRPC Streams.Read resolved ${responses.length} response(s) ${this.summarizeReadResponses(
-              responses,
-            )}`,
+          appLogger.debug(
+            {
+              event: 'grpc_response',
+              rpc: 'Streams.Read',
+              responseCount: responses.length,
+              summary: this.summarizeReadResponses(responses),
+            },
+            'gRPC Streams.Read resolved',
           );
           for (const response of responses) {
             subscriber.next(response);
@@ -213,13 +227,19 @@ export class StreamsController {
     callback: sendUnaryData<AppendResp>,
   ): void {
     logHotPath('gRPC Streams.Append', {
-      detail: summarizeGrpcMetadata(call.metadata),
+      summary: summarizeGrpcMetadata(call.metadata),
+      trace: {
+        metadata: extractGrpcMetadata(call.metadata),
+      },
     });
     const operation = this.stats.startOperation('append');
     let completed = false;
     const messages: AppendReq[] = [];
 
     call.on('data', (message: AppendReq) => {
+      logStreamRequestMessage('gRPC Streams.Append', message, {
+        rpc: 'Streams.Append',
+      });
       messages.push(message);
     });
 
@@ -253,7 +273,11 @@ export class StreamsController {
     metadata?: Metadata,
   ): Promise<DeleteResp> | Observable<DeleteResp> | DeleteResp {
     logHotPath('gRPC Streams.Delete', {
-      detail: summarizeGrpcMetadata(metadata),
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
     });
     const operation = this.stats.startOperation('delete');
     return (async () => {
@@ -274,7 +298,11 @@ export class StreamsController {
     metadata?: Metadata,
   ): Promise<TombstoneResp> | Observable<TombstoneResp> | TombstoneResp {
     logHotPath('gRPC Streams.Tombstone', {
-      detail: summarizeGrpcMetadata(metadata),
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
     });
     const operation = this.stats.startOperation('tombstone');
     return (async () => {
@@ -292,7 +320,10 @@ export class StreamsController {
   @GrpcStreamCall('Streams', 'batchAppend')
   batchAppend(call: ServerDuplexStream<BatchAppendReq, BatchAppendResp>): void {
     logHotPath('gRPC Streams.BatchAppend', {
-      detail: summarizeGrpcMetadata(call.metadata),
+      summary: summarizeGrpcMetadata(call.metadata),
+      trace: {
+        metadata: extractGrpcMetadata(call.metadata),
+      },
     });
     const session = new BatchAppendSession(
       call,
@@ -303,6 +334,9 @@ export class StreamsController {
     );
 
     call.on('data', (message: BatchAppendReq) => {
+      logStreamRequestMessage('gRPC Streams.BatchAppend', message, {
+        rpc: 'Streams.BatchAppend',
+      });
       session.onData(message);
     });
     call.on('end', () => {

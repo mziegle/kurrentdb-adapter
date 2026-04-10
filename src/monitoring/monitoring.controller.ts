@@ -6,7 +6,12 @@ import {
   StatsReq,
   StatsResp,
 } from '../interfaces/monitoring';
-import { logHotPath } from '../shared/debug-log';
+import { Metadata } from '@grpc/grpc-js';
+import {
+  extractGrpcMetadata,
+  logHotPath,
+  summarizeGrpcMetadata,
+} from '../shared/debug-log';
 import { AdapterStatsService } from '../operations/adapter-stats.service';
 
 @Controller()
@@ -14,9 +19,14 @@ import { AdapterStatsService } from '../operations/adapter-stats.service';
 export class MonitoringController implements MonitoringControllerContract {
   constructor(private readonly statsService: AdapterStatsService) {}
 
-  stats(request: StatsReq): Observable<StatsResp> {
-    void request;
-    logHotPath('gRPC Monitoring.Stats');
+  stats(request: StatsReq, metadata?: Metadata): Observable<StatsResp> {
+    logHotPath('gRPC Monitoring.Stats', {
+      summary: summarizeGrpcMetadata(metadata),
+      trace: {
+        metadata: extractGrpcMetadata(metadata),
+        request,
+      },
+    });
     return from(this.statsService.createGrpcStats());
   }
 }

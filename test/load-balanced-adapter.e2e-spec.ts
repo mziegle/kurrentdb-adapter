@@ -2,6 +2,7 @@ import { INestMicroservice } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Transport } from '@nestjs/microservices';
 import {
+  AppendResult,
   jsonEvent,
   KurrentDBClient,
   START,
@@ -22,7 +23,9 @@ type RunningAdapterInstance = {
   client: KurrentDBClient;
 };
 
-async function startAdapterInstance(grpcPort: number): Promise<RunningAdapterInstance> {
+async function startAdapterInstance(
+  grpcPort: number,
+): Promise<RunningAdapterInstance> {
   const moduleFixture: TestingModule = await Test.createTestingModule({
     imports: [AppModule],
   }).compile();
@@ -125,125 +128,136 @@ describe('Adapter load-balanced concurrency', () => {
     return events;
   }
 
-  maybeIt('processes load-balanced concurrent writes without duplicate processing', async () => {
-    const sharedStream = `lb-concurrent-${randomUUID()}`;
+  maybeIt(
+    'processes load-balanced concurrent writes without duplicate processing',
+    async () => {
+      const sharedStream = `lb-concurrent-${randomUUID()}`;
 
-    const loadBalancedRequests = Array.from({ length: 60 }, (_, index) => {
-      const client = index % 2 === 0 ? firstInstance.client : secondInstance.client;
+      const loadBalancedRequests = Array.from({ length: 60 }, (_, index) => {
+        const client =
+          index % 2 === 0 ? firstInstance.client : secondInstance.client;
 
-      return client.appendToStream(
-        sharedStream,
-        jsonEvent({
-          type: 'load-balanced-write',
-          data: {
-            requestId: index,
-            instance: index % 2 === 0 ? 'first' : 'second',
-          },
-        }),
+        return client.appendToStream(
+          sharedStream,
+          jsonEvent({
+            type: 'load-balanced-write',
+            data: {
+              requestId: index,
+              instance: index % 2 === 0 ? 'first' : 'second',
+            },
+          }),
+        );
+      });
+
+      await Promise.all(loadBalancedRequests);
+
+      const writes = await readStreamPayloads<{
+        requestId: number;
+        instance: string;
+      }>(sharedStream);
+
+      expect(writes).toHaveLength(60);
+      expect(new Set(writes.map(({ requestId }) => requestId)).size).toBe(60);
+      expect(new Set(writes.map(({ instance }) => instance))).toEqual(
+        new Set(['first', 'second']),
       );
-    });
+    },
+  );
 
-    await Promise.all(loadBalancedRequests);
-
-    const writes = await readStreamPayloads<{
-      requestId: number;
-      instance: string;
-    }>(sharedStream);
-
-    expect(writes).toHaveLength(60);
-    expect(new Set(writes.map(({ requestId }) => requestId)).size).toBe(60);
-    expect(new Set(writes.map(({ instance }) => instance))).toEqual(
-      new Set(['first', 'second']),
-    );
-  });
-
-  maybeIt('enforces optimistic concurrency consistently across instances', async () => {
-    const conflictStream = `lb-conflict-${randomUUID()}`;
-    const seedResult = await firstInstance.client.appendToStream(
-      conflictStream,
-      jsonEvent({
-        type: 'seed',
-        data: { value: 'seed' },
-      }),
-    );
-
-    let expectedRevision = seedResult.nextExpectedRevision;
-
-    for (let round = 0; round < 20; round += 1) {
-      const attemptFromFirst = firstInstance.client.appendToStream(
+  maybeIt(
+    'enforces optimistic concurrency consistently across instances',
+    async () => {
+      const conflictStream = `lb-conflict-${randomUUID()}`;
+      const seedResult = await firstInstance.client.appendToStream(
         conflictStream,
         jsonEvent({
-          type: 'conflict-attempt',
-          data: { round, instance: 'first' },
+          type: 'seed',
+          data: { value: 'seed' },
         }),
-        { streamState: expectedRevision },
       );
 
-      const attemptFromSecond = secondInstance.client.appendToStream(
-        conflictStream,
+      let expectedRevision = seedResult.nextExpectedRevision;
+
+      for (let round = 0; round < 20; round += 1) {
+        const attemptFromFirst = firstInstance.client.appendToStream(
+          conflictStream,
+          jsonEvent({
+            type: 'conflict-attempt',
+            data: { round, instance: 'first' },
+          }),
+          { streamState: expectedRevision },
+        );
+
+        const attemptFromSecond = secondInstance.client.appendToStream(
+          conflictStream,
+          jsonEvent({
+            type: 'conflict-attempt',
+            data: { round, instance: 'second' },
+          }),
+          { streamState: expectedRevision },
+        );
+
+        const [firstResult, secondResult] = await Promise.allSettled([
+          attemptFromFirst,
+          attemptFromSecond,
+        ]);
+
+        const successfulWrites = [firstResult, secondResult].filter(
+          (candidate): candidate is PromiseFulfilledResult<AppendResult> =>
+            candidate.status === 'fulfilled',
+        );
+
+        const rejectedWrites = [firstResult, secondResult].filter(
+          (candidate): candidate is PromiseRejectedResult =>
+            candidate.status === 'rejected',
+        );
+
+        expect(successfulWrites).toHaveLength(1);
+        expect(rejectedWrites).toHaveLength(1);
+        expect(rejectedWrites[0].reason).toBeInstanceOf(
+          WrongExpectedVersionError,
+        );
+
+        expectedRevision = successfulWrites[0].value.nextExpectedRevision;
+      }
+
+      const conflictEvents = await readStreamPayloads<{
+        round?: number;
+        instance?: string;
+      }>(conflictStream);
+
+      expect(conflictEvents).toHaveLength(21);
+
+      const committedRounds = conflictEvents
+        .filter(({ round }) => typeof round === 'number')
+        .map(({ round }) => round as number);
+
+      expect(committedRounds).toHaveLength(20);
+      expect(new Set(committedRounds).size).toBe(20);
+    },
+  );
+
+  maybeIt(
+    'keeps both instances functional after concurrent traffic',
+    async () => {
+      const probeFromFirst = await firstInstance.client.appendToStream(
+        `lb-probe-${randomUUID()}`,
         jsonEvent({
-          type: 'conflict-attempt',
-          data: { round, instance: 'second' },
+          type: 'probe',
+          data: { via: 'first' },
         }),
-        { streamState: expectedRevision },
       );
 
-      const [firstResult, secondResult] = await Promise.allSettled([
-        attemptFromFirst,
-        attemptFromSecond,
-      ]);
-
-      const successfulWrites = [firstResult, secondResult].filter(
-        (candidate): candidate is PromiseFulfilledResult<unknown> =>
-          candidate.status === 'fulfilled',
+      const probeFromSecond = await secondInstance.client.appendToStream(
+        `lb-probe-${randomUUID()}`,
+        jsonEvent({
+          type: 'probe',
+          data: { via: 'second' },
+        }),
       );
 
-      const rejectedWrites = [firstResult, secondResult].filter(
-        (candidate): candidate is PromiseRejectedResult =>
-          candidate.status === 'rejected',
-      );
-
-      expect(successfulWrites).toHaveLength(1);
-      expect(rejectedWrites).toHaveLength(1);
-      expect(rejectedWrites[0].reason).toBeInstanceOf(WrongExpectedVersionError);
-
-      expectedRevision = (successfulWrites[0].value as { nextExpectedRevision: bigint })
-        .nextExpectedRevision;
-    }
-
-    const conflictEvents = await readStreamPayloads<{
-      round?: number;
-      instance?: string;
-    }>(conflictStream);
-
-    expect(conflictEvents).toHaveLength(21);
-
-    const committedRounds = conflictEvents
-      .filter(({ round }) => typeof round === 'number')
-      .map(({ round }) => round as number);
-
-    expect(committedRounds).toHaveLength(20);
-    expect(new Set(committedRounds).size).toBe(20);
-  });
-
-  maybeIt('keeps both instances functional after concurrent traffic', async () => {
-    const probeFromFirst = await firstInstance.client.appendToStream(
-      `lb-probe-${randomUUID()}`,
-      jsonEvent({
-        type: 'probe',
-        data: { via: 'first' },
-      }),
-    );
-
-    const probeFromSecond = await secondInstance.client.appendToStream(
-      `lb-probe-${randomUUID()}`,
-      jsonEvent({
-        type: 'probe',
-        data: { via: 'second' },
-      }),
-    );
-
-    expect(probeFromFirst).toMatchObject({ success: true });
-    expect(probeFromSecond).toMatchObject({ success: true });
-  });
+      expect(probeFromFirst).toMatchObject({ success: true });
+      expect(probeFromSecond).toMatchObject({ success: true });
+    },
+  );
 });
