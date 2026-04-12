@@ -21,5 +21,10 @@ export function printOutput(payload: unknown, asJson: boolean): void {
     return;
   }
 
-  console.dir(payload, { depth: null, colors: true });
+  console.dir(payload, {
+    depth: null,
+    colors:
+      process.stdout.isTTY &&
+      process.env.NO_COLOR === undefined,
+  });
 }

@@ -1,11 +1,12 @@
 # kcli
 
-Developer-focused TypeScript CLI/TUI for validating a KurrentDB/EventStoreDB-compatible backend (for example this adapter) against a reference backend.
+Developer-focused TypeScript CLI/TUI for working with a KurrentDB/EventStoreDB-compatible endpoint.
 
 ## What it supports
 
 - Non-interactive commands for scripting:
   - `bench report`
+  - `config show`
   - `ping`
   - `stream read <stream>`
   - `stream append <stream>`
@@ -27,7 +28,7 @@ npm link
 After that, the command is available as:
 
 ```bash
-kcli ping --backend adapter
+kcli ping
 ```
 
 To remove the global link later:
@@ -40,34 +41,33 @@ The CLI has its own `package.json` and should be installed and tooled from `cli/
 
 ## Configuration
 
-The CLI expects two named backends:
+The default endpoint is:
 
-- `reference`
-- `adapter`
+```bash
+kurrentdb://127.0.0.1:2113?tls=false
+```
 
-Configuration sources (in order of precedence):
+Configuration sources for the default endpoint, in order of precedence:
 
-1. Environment variables:
-   - `KDB_REFERENCE_CONNECTION`
-   - `KDB_ADAPTER_CONNECTION`
-2. Config file: `kcli.config.json` (or custom path via `KDB_CLI_CONFIG_PATH`)
+1. Environment variable: `KDB_CONNECTION`
+2. Config file: `kcli.config.json` with `connectionString`
+3. Built-in default: `kurrentdb://127.0.0.1:2113?tls=false`
 
 Example config file:
 
 ```json
 {
-  "defaultBackend": "adapter",
-  "backends": {
-    "reference": {
-      "kind": "kurrent",
-      "connectionString": "kurrentdb://127.0.0.1:2114?tls=false"
-    },
-    "adapter": {
-      "kind": "kurrent",
-      "connectionString": "kurrentdb://127.0.0.1:2113?tls=false"
-    }
-  }
+  "connectionString": "kurrentdb://127.0.0.1:2113?tls=false"
 }
+```
+
+For `kcli test compare`, set a second endpoint with `KDB_COMPARE_CONNECTION` or `compareConnectionString`.
+
+To inspect the effective configuration and its sources:
+
+```bash
+kcli config show
+kcli config show --json
 ```
 
 ## Commands
@@ -75,7 +75,7 @@ Example config file:
 ### Ping
 
 ```bash
-kcli ping --backend adapter
+kcli ping
 ```
 
 ### Benchmark report
@@ -104,6 +104,13 @@ kcli stream append my-stream \
   --expected-revision any
 ```
 
+You can also read JSON from files or stdin:
+
+```bash
+kcli stream append my-stream --type user-created --data @event.json
+cat event.json | kcli stream append my-stream --type user-created --data -
+```
+
 ### Stream tail
 
 ```bash
@@ -118,13 +125,22 @@ kcli test read
 kcli test subscribe
 ```
 
-### Compare adapter vs reference
+### Compare current endpoint vs another endpoint
 
 ```bash
 kcli test compare --stream my-stream
 ```
 
-This compares event id/type/revision/position/data/metadata/ordering.
+This compares event id/type/revision/position/data/metadata/ordering between the default endpoint and the compare endpoint.
+
+### Config inspection
+
+```bash
+kcli config show
+kcli config show --json
+```
+
+This prints the effective default endpoint, the optional compare endpoint, and where each value came from.
 
 ### TUI
 
@@ -141,6 +157,7 @@ kcli tui --stream my-stream
 - `npm run test` run automated tests
 - `npm run lint` run ESLint on CLI source
 - `npm run typecheck` run TypeScript without emitting files
+- Exit codes: `0` success, `2` usage error, `1` runtime failure
 
 ## Architecture
 
@@ -153,5 +170,5 @@ kcli tui --stream my-stream
 ## Assumptions
 
 - Connection strings are valid KurrentDB/EventStoreDB URIs.
-- Both configured backends implement compatible stream semantics.
+- The compare command targets two compatible endpoints with existing stream data.
 - Current compare command targets existing stream data; seeding strategy can be added later.

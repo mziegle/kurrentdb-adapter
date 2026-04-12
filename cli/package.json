@@ -2,7 +2,7 @@
   "name": "kurrentdb-adapter-cli",
   "version": "0.1.0",
   "private": true,
-  "description": "Developer CLI/TUI for testing KurrentDB-compatible adapters",
+  "description": "Developer CLI/TUI for working with KurrentDB-compatible endpoints",
   "type": "module",
   "bin": {
     "kcli": "dist/index.js"
