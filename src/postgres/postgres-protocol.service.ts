@@ -18,7 +18,11 @@ import { Code } from '../interfaces/code';
 import { Any } from '../interfaces/google/protobuf/any';
 import { createInfoResponseBody } from '../stub-utils';
 import { PersistedEventRow } from './postgres.types';
-import { PostgresValueService } from './postgres-value.service';
+import {
+  isBackwardsRead,
+  toNumber,
+  toTicksSinceUnixEpoch,
+} from './postgres-value';
 
 type EmptyMessage = {
   serializeBinary(): Uint8Array;
@@ -51,12 +55,10 @@ type StreamDeletedMessageConstructor = new () => StreamDeletedMessage;
 
 @Injectable()
 export class PostgresProtocolService {
-  constructor(private readonly values: PostgresValueService) {}
-
   mapRowToReadResponse(row: PersistedEventRow): ReadResp {
     const grpcMetadata = {
       type: row.metadata?.type ?? '<no-event-type-provided>',
-      created: this.values.toTicksSinceUnixEpoch(row.created_at),
+      created: toTicksSinceUnixEpoch(row.created_at),
       'content-type':
         row.metadata?.['content-type'] ?? 'application/octet-stream',
     };
@@ -68,15 +70,15 @@ export class PostgresProtocolService {
           streamIdentifier: {
             streamName: Buffer.from(row.stream_name),
           },
-          streamRevision: this.values.toNumber(row.stream_revision),
-          preparePosition: this.values.toNumber(row.global_position),
-          commitPosition: this.values.toNumber(row.global_position),
+          streamRevision: toNumber(row.stream_revision),
+          preparePosition: toNumber(row.global_position),
+          commitPosition: toNumber(row.global_position),
           metadata: grpcMetadata,
           customMetadata: Buffer.from(row.custom_metadata ?? new Uint8Array()),
           data: Buffer.from(row.data ?? new Uint8Array()),
         },
         link: undefined,
-        commitPosition: this.values.toNumber(row.global_position),
+        commitPosition: toNumber(row.global_position),
       },
     };
   }
@@ -109,7 +111,7 @@ export class PostgresProtocolService {
   createExistingEmptyStreamReadResponses(
     options: NonNullable<ReadReq['options']>,
   ): ReadResp[] {
-    if (this.values.isBackwardsRead(options.readDirection)) {
+    if (isBackwardsRead(options.readDirection)) {
       return [{ lastStreamPosition: 0 }];
     }
 

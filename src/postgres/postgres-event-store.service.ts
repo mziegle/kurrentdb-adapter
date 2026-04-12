@@ -43,7 +43,6 @@ import {
 } from './postgres.constants';
 import { PostgresInfrastructureService } from './postgres-infrastructure.service';
 import { PostgresProtocolService } from './postgres-protocol.service';
-import { PostgresRetentionService } from './postgres-retention.service';
 import { PostgresSubscriptionService } from './postgres-subscription.service';
 import {
   ActiveScavenge,
@@ -51,7 +50,20 @@ import {
   StreamRetentionPolicy,
   StreamStateRow,
 } from './postgres.types';
-import { PostgresValueService } from './postgres-value.service';
+import {
+  buildRetentionVisibilityClause,
+  buildScavengeEligibilityClause,
+  getReadableCurrentRevision,
+  isMetastream,
+  parseMetadataPolicyUpdate,
+} from './postgres-retention';
+import {
+  createTimestamp,
+  decodeStreamName,
+  getEventId,
+  isBackwardsRead,
+  toNumber,
+} from './postgres-value';
 
 @Injectable()
 export class PostgresEventStoreService
@@ -63,9 +75,7 @@ export class PostgresEventStoreService
   constructor(
     private readonly infrastructure: PostgresInfrastructureService,
     private readonly protocol: PostgresProtocolService,
-    private readonly retention: PostgresRetentionService,
     private readonly subscriptions: PostgresSubscriptionService,
-    private readonly values: PostgresValueService,
   ) {
     this.pool = this.infrastructure.createPool();
   }
@@ -123,14 +133,14 @@ export class PostgresEventStoreService
       currentGlobalPosition:
         row.current_global_position === null
           ? 0
-          : this.values.toNumber(row.current_global_position),
+          : toNumber(row.current_global_position),
       pgPoolIdleCount: this.pool.idleCount,
       pgPoolTotalCount: this.pool.totalCount,
       pgPoolWaitingCount: this.pool.waitingCount,
-      retentionPolicyCount: this.values.toNumber(row.retention_policy_count),
-      streamCount: this.values.toNumber(row.stream_count),
-      tombstonedStreamCount: this.values.toNumber(row.tombstoned_stream_count),
-      totalEvents: this.values.toNumber(row.total_events),
+      retentionPolicyCount: toNumber(row.retention_policy_count),
+      streamCount: toNumber(row.stream_count),
+      tombstonedStreamCount: toNumber(row.tombstoned_stream_count),
+      totalEvents: toNumber(row.total_events),
     };
   }
 
@@ -163,10 +173,8 @@ export class PostgresEventStoreService
       throw new Error('Append request is missing a stream identifier.');
     }
 
-    const streamName = this.values.decodeStreamName(
-      options.streamIdentifier.streamName,
-    );
-    const metadataPolicyUpdate = this.retention.parseMetadataPolicyUpdate(
+    const streamName = decodeStreamName(options.streamIdentifier.streamName);
+    const metadataPolicyUpdate = parseMetadataPolicyUpdate(
       streamName,
       proposedMessages,
     );
@@ -181,8 +189,7 @@ export class PostgresEventStoreService
         client,
         streamName,
       );
-      const currentRevision =
-        this.retention.getReadableCurrentRevision(streamState);
+      const currentRevision = getReadableCurrentRevision(streamState);
       const mismatch = this.getExpectedVersionMismatch(
         options,
         currentRevision,
@@ -213,7 +220,7 @@ export class PostgresEventStoreService
             streamName,
             targetGeneration,
             nextRevision,
-            this.values.getEventId(proposedMessage.id),
+            getEventId(proposedMessage.id),
             JSON.stringify(proposedMessage.metadata ?? {}),
             Buffer.from(proposedMessage.customMetadata ?? new Uint8Array()),
             Buffer.from(proposedMessage.data ?? new Uint8Array()),
@@ -237,15 +244,12 @@ export class PostgresEventStoreService
           insertValues,
         );
 
-        lastPosition = this.values.toNumber(
+        lastPosition = toNumber(
           result.rows[result.rows.length - 1].global_position,
         );
       }
 
-      if (
-        proposedMessages.length > 0 &&
-        !this.retention.isMetastream(streamName)
-      ) {
+      if (proposedMessages.length > 0 && !isMetastream(streamName)) {
         await this.upsertStreamCurrentRevision(
           client,
           streamName,
@@ -409,7 +413,7 @@ export class PostgresEventStoreService
     this.assertSupportedReadCombination(options, streamOptionCase);
 
     if (options.stream?.streamIdentifier?.streamName) {
-      const streamName = this.values.decodeStreamName(
+      const streamName = decodeStreamName(
         options.stream.streamIdentifier.streamName,
       );
       await this.ensureStreamIsNotTombstoned(streamName);
@@ -452,7 +456,7 @@ export class PostgresEventStoreService
     };
 
     if (options.stream?.streamIdentifier?.streamName) {
-      const streamName = this.values.decodeStreamName(
+      const streamName = decodeStreamName(
         options.stream.streamIdentifier.streamName,
       );
       await this.ensureStreamIsNotTombstoned(streamName);
@@ -502,7 +506,7 @@ export class PostgresEventStoreService
             return;
           }
 
-          nextRevisionExclusive = this.values.toNumber(row.stream_revision);
+          nextRevisionExclusive = toNumber(row.stream_revision);
           yield this.protocol.mapRowToReadResponse(row);
         }
 
@@ -519,7 +523,7 @@ export class PostgresEventStoreService
 
         yield {
           caughtUp: {
-            timestamp: this.values.createTimestamp(),
+            timestamp: createTimestamp(),
             streamRevision:
               caughtUpRevision >= 0 ? caughtUpRevision : undefined,
           },
@@ -580,7 +584,7 @@ export class PostgresEventStoreService
     streamOptionCase: 'Stream' | 'All',
   ): void {
     const countOptionCase = this.getReadCountOptionCase(options);
-    const readDirection = this.values.isBackwardsRead(options.readDirection)
+    const readDirection = isBackwardsRead(options.readDirection)
       ? 'Backwards'
       : 'Forwards';
     const filterOptionCase = this.getReadFilterOptionCase(options);
@@ -630,7 +634,7 @@ export class PostgresEventStoreService
             return;
           }
 
-          nextPositionExclusive = this.values.toNumber(row.global_position);
+          nextPositionExclusive = toNumber(row.global_position);
           yield this.protocol.mapRowToReadResponse(row);
         }
 
@@ -646,7 +650,7 @@ export class PostgresEventStoreService
 
         yield {
           caughtUp: {
-            timestamp: this.values.createTimestamp(),
+            timestamp: createTimestamp(),
             position:
               caughtUpPosition !== null && caughtUpPosition >= 0
                 ? {
@@ -680,9 +684,7 @@ export class PostgresEventStoreService
       throw new Error('Delete request is missing a stream identifier.');
     }
 
-    const streamName = this.values.decodeStreamName(
-      options.streamIdentifier.streamName,
-    );
+    const streamName = decodeStreamName(options.streamIdentifier.streamName);
     await this.ensureStreamIsNotTombstoned(streamName);
     const client = await this.pool.connect();
 
@@ -693,8 +695,7 @@ export class PostgresEventStoreService
         client,
         streamName,
       );
-      const currentRevision =
-        this.retention.getReadableCurrentRevision(streamState);
+      const currentRevision = getReadableCurrentRevision(streamState);
       const mismatch = this.getDeleteExpectedVersionMismatch(
         options,
         currentRevision,
@@ -739,9 +740,7 @@ export class PostgresEventStoreService
         client,
       );
 
-      const lastPosition = this.values.toNumber(
-        lastEvent.rows[0].global_position,
-      );
+      const lastPosition = toNumber(lastEvent.rows[0].global_position);
 
       return {
         position: {
@@ -763,9 +762,7 @@ export class PostgresEventStoreService
       throw new Error('Tombstone request is missing a stream identifier.');
     }
 
-    const streamName = this.values.decodeStreamName(
-      options.streamIdentifier.streamName,
-    );
+    const streamName = decodeStreamName(options.streamIdentifier.streamName);
     const client = await this.pool.connect();
 
     try {
@@ -784,8 +781,7 @@ export class PostgresEventStoreService
         client,
         streamName,
       );
-      const currentRevision =
-        this.retention.getReadableCurrentRevision(streamState);
+      const currentRevision = getReadableCurrentRevision(streamState);
       const mismatch = this.getTombstoneExpectedVersionMismatch(
         options,
         currentRevision,
@@ -814,7 +810,7 @@ export class PostgresEventStoreService
       let lastPosition =
         lastEvent.rows.length === 0
           ? 0
-          : this.values.toNumber(lastEvent.rows[0].global_position);
+          : toNumber(lastEvent.rows[0].global_position);
 
       nextRevision += 1;
 
@@ -848,9 +844,7 @@ export class PostgresEventStoreService
         ],
       );
 
-      lastPosition = this.values.toNumber(
-        tombstoneEvent.rows[0].global_position,
-      );
+      lastPosition = toNumber(tombstoneEvent.rows[0].global_position);
 
       await client.query(
         `
@@ -927,7 +921,7 @@ export class PostgresEventStoreService
     streamName: string,
   ): Promise<number | null> {
     const streamState = await this.getStreamRetentionPolicy(client, streamName);
-    return this.retention.getReadableCurrentRevision(streamState);
+    return getReadableCurrentRevision(streamState);
   }
 
   private async getStreamRetentionPolicy(
@@ -958,19 +952,14 @@ export class PostgresEventStoreService
     if (policyResult.rows.length > 0) {
       const row = policyResult.rows[0];
       return {
-        currentGeneration: this.values.toNumber(row.current_generation ?? 0),
+        currentGeneration: toNumber(row.current_generation ?? 0),
         currentRevision:
-          row.current_revision === null
-            ? null
-            : this.values.toNumber(row.current_revision),
+          row.current_revision === null ? null : toNumber(row.current_revision),
         deletedAt: row.deleted_at,
-        maxAge: row.max_age === null ? null : this.values.toNumber(row.max_age),
-        maxCount:
-          row.max_count === null ? null : this.values.toNumber(row.max_count),
+        maxAge: row.max_age === null ? null : toNumber(row.max_age),
+        maxCount: row.max_count === null ? null : toNumber(row.max_count),
         truncateBefore:
-          row.truncate_before === null
-            ? null
-            : this.values.toNumber(row.truncate_before),
+          row.truncate_before === null ? null : toNumber(row.truncate_before),
       };
     }
 
@@ -1000,12 +989,8 @@ export class PostgresEventStoreService
     }
 
     return {
-      currentGeneration: this.values.toNumber(
-        fallbackResult.rows[0].stream_generation,
-      ),
-      currentRevision: this.values.toNumber(
-        fallbackResult.rows[0].stream_revision,
-      ),
+      currentGeneration: toNumber(fallbackResult.rows[0].stream_generation),
+      currentRevision: toNumber(fallbackResult.rows[0].stream_revision),
       deletedAt: null,
       maxAge: null,
       maxCount: null,
@@ -1034,7 +1019,7 @@ export class PostgresEventStoreService
       this.pool,
       streamName,
     );
-    if (this.retention.getReadableCurrentRevision(streamState) === null) {
+    if (getReadableCurrentRevision(streamState) === null) {
       return [
         {
           streamNotFound: {
@@ -1046,9 +1031,8 @@ export class PostgresEventStoreService
       ];
     }
 
-    const limit =
-      options.count !== undefined ? this.values.toNumber(options.count) : 100;
-    const isBackwards = this.values.isBackwardsRead(options.readDirection);
+    const limit = options.count !== undefined ? toNumber(options.count) : 100;
+    const isBackwards = isBackwardsRead(options.readDirection);
     const order = isBackwards ? 'DESC' : 'ASC';
     const comparator = isBackwards ? '<=' : '>=';
     const boundary = this.resolveReadBoundary(options);
@@ -1084,7 +1068,7 @@ export class PostgresEventStoreService
           ON retention.stream_name = events.stream_name
         ${whereClause}
           ${whereClause ? 'AND' : 'WHERE'}
-          ${this.retention.buildRetentionVisibilityClause('events', 'retention')}
+          ${buildRetentionVisibilityClause('events', 'retention')}
         ORDER BY events.stream_revision ${order}
         LIMIT $${params.length}
       `,
@@ -1097,9 +1081,8 @@ export class PostgresEventStoreService
   private async readAllSnapshot(
     options: NonNullable<ReadReq['options']>,
   ): Promise<ReadResp[]> {
-    const limit =
-      options.count !== undefined ? this.values.toNumber(options.count) : 100;
-    const isBackwards = this.values.isBackwardsRead(options.readDirection);
+    const limit = options.count !== undefined ? toNumber(options.count) : 100;
+    const isBackwards = isBackwardsRead(options.readDirection);
     const order = isBackwards ? 'DESC' : 'ASC';
     const comparator = isBackwards ? '<=' : '>=';
     const boundary = this.resolveAllReadBoundary(options);
@@ -1161,7 +1144,7 @@ export class PostgresEventStoreService
           // Emit a terminal frame so clients don't see an entirely empty
           // response stream when $all is read against an empty database.
           caughtUp: {
-            timestamp: this.values.createTimestamp(),
+            timestamp: createTimestamp(),
           },
         },
       ];
@@ -1178,7 +1161,7 @@ export class PostgresEventStoreService
       this.pool,
       streamName,
     );
-    if (this.retention.getReadableCurrentRevision(streamState) === null) {
+    if (getReadableCurrentRevision(streamState) === null) {
       return -1;
     }
 
@@ -1188,7 +1171,7 @@ export class PostgresEventStoreService
     }
 
     if (stream.revision !== undefined) {
-      return this.values.toNumber(stream.revision) - 1;
+      return toNumber(stream.revision) - 1;
     }
 
     if (stream.end !== undefined) {
@@ -1207,7 +1190,7 @@ export class PostgresEventStoreService
     }
 
     if (all.position) {
-      return this.values.toNumber(all.position.commitPosition);
+      return toNumber(all.position.commitPosition);
     }
 
     if (all.end !== undefined) {
@@ -1240,7 +1223,7 @@ export class PostgresEventStoreService
         WHERE events.stream_name = $1
           AND events.stream_generation = $2
           AND events.stream_revision > $3
-          AND ${this.retention.buildRetentionVisibilityClause('events', 'retention')}
+          AND ${buildRetentionVisibilityClause('events', 'retention')}
         ORDER BY events.stream_revision ASC
         LIMIT 100
       `,
@@ -1360,7 +1343,7 @@ export class PostgresEventStoreService
       return null;
     }
 
-    return this.values.toNumber(result.rows[0].global_position);
+    return toNumber(result.rows[0].global_position);
   }
 
   private async ensureStreamIsNotTombstoned(
@@ -1408,7 +1391,7 @@ export class PostgresEventStoreService
             ON retention.stream_name = events.stream_name
           LEFT JOIN tombstoned_streams tombstones
             ON tombstones.stream_name = events.stream_name
-          WHERE ${this.retention.buildScavengeEligibilityClause(
+          WHERE ${buildScavengeEligibilityClause(
             'events',
             'retention',
             'tombstones',
@@ -1528,9 +1511,7 @@ export class PostgresEventStoreService
     currentRevision: number | null,
   ): AppendResp | null {
     const expectedRevision =
-      options.revision === undefined
-        ? undefined
-        : this.values.toNumber(options.revision);
+      options.revision === undefined ? undefined : toNumber(options.revision);
     const matches =
       options.any !== undefined ||
       (options.noStream !== undefined && currentRevision === null) ||
@@ -1565,9 +1546,7 @@ export class PostgresEventStoreService
     streamName: string,
   ): Error | null {
     const expectedRevision =
-      options.revision === undefined
-        ? undefined
-        : this.values.toNumber(options.revision);
+      options.revision === undefined ? undefined : toNumber(options.revision);
     const matches =
       options.any !== undefined ||
       (options.noStream !== undefined && currentRevision === null) ||
@@ -1591,9 +1570,7 @@ export class PostgresEventStoreService
     streamName: string,
   ): Error | null {
     const expectedRevision =
-      options.revision === undefined
-        ? undefined
-        : this.values.toNumber(options.revision);
+      options.revision === undefined ? undefined : toNumber(options.revision);
     const matches =
       options.any !== undefined ||
       (options.noStream !== undefined && currentRevision === null) ||
@@ -1620,17 +1597,17 @@ export class PostgresEventStoreService
     }
 
     if (stream.revision !== undefined) {
-      return this.values.toNumber(stream.revision);
+      return toNumber(stream.revision);
     }
 
     if (stream.start !== undefined) {
-      return this.values.isBackwardsRead(options.readDirection)
+      return isBackwardsRead(options.readDirection)
         ? Number.MAX_SAFE_INTEGER
         : 0;
     }
 
     if (stream.end !== undefined) {
-      return this.values.isBackwardsRead(options.readDirection)
+      return isBackwardsRead(options.readDirection)
         ? Number.MAX_SAFE_INTEGER
         : null;
     }
@@ -1647,20 +1624,20 @@ export class PostgresEventStoreService
     }
 
     if (all.position !== undefined) {
-      const commitPosition = this.values.toNumber(all.position.commitPosition);
-      return this.values.isBackwardsRead(options.readDirection)
+      const commitPosition = toNumber(all.position.commitPosition);
+      return isBackwardsRead(options.readDirection)
         ? commitPosition - 1
         : commitPosition;
     }
 
     if (all.start !== undefined) {
-      return this.values.isBackwardsRead(options.readDirection)
+      return isBackwardsRead(options.readDirection)
         ? Number.MAX_SAFE_INTEGER
         : 0;
     }
 
     if (all.end !== undefined) {
-      return this.values.isBackwardsRead(options.readDirection)
+      return isBackwardsRead(options.readDirection)
         ? Number.MAX_SAFE_INTEGER
         : null;
     }
