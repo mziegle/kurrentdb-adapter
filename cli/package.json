@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "npm run build --silent && node dist/index.js",
+    "bench:report": "npm run build --silent && node dist/index.js bench report",
     "test": "npm run build && node --test --test-isolation=none test/*.spec.mjs",
     "lint": "eslint \"src/**/*.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",

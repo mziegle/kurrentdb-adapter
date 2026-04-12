@@ -5,6 +5,7 @@ Developer-focused TypeScript CLI/TUI for validating a KurrentDB/EventStoreDB-com
 ## What it supports
 
 - Non-interactive commands for scripting:
+  - `bench report`
   - `ping`
   - `stream read <stream>`
   - `stream append <stream>`
@@ -77,6 +78,15 @@ Example config file:
 kcli ping --backend adapter
 ```
 
+### Benchmark report
+
+```bash
+kcli bench report
+```
+
+This writes JSON and HTML reports under `benchmark/reports/` from the current
+working directory.
+
 ### Stream read
 
 ```bash
@@ -126,6 +136,7 @@ kcli tui --stream my-stream
 
 - `npm run build` compile to `dist`
 - `npm run dev -- <command>` build and run CLI locally
+- `npm run bench:report` build and run the benchmark report workflow
 - `npm link` expose the built CLI as the global `kcli` command
 - `npm run test` run automated tests
 - `npm run lint` run ESLint on CLI source

@@ -2,7 +2,7 @@
 
 This document is for contributors working on `kurrentdb-adapter`.
 
-User-facing adapter information lives in [README.md](c:\Users\micha\Repos\kurrentdb-adapter\README.md).
+User-facing adapter information lives in [README.md](README.md).
 
 ## Development Setup
 
@@ -20,7 +20,7 @@ npm install
 
 ## Local Services
 
-This repo includes a local Postgres stack and a real KurrentDB instance in [docker-compose.yml](c:\Users\micha\Repos\kurrentdb-adapter\docker-compose.yml).
+This repo includes a local Postgres stack and a real KurrentDB instance in [docker-compose.yml](docker-compose.yml).
 
 Start PostgreSQL:
 
@@ -73,40 +73,22 @@ npm run build
 npm run start:prod
 ```
 
-## Playground Scripts
+## Developer CLI
 
-The `playground/` folder contains small scripts for experimenting against a running adapter.
+The developer CLI lives in [`cli/`](cli) and owns tracing, comparison, and benchmark workflows.
 
-Default connection string:
-
-```bash
-kurrentdb://127.0.0.1:2113?tls=false
-```
-
-Override it with:
+Examples:
 
 ```bash
-KURRENTDB_CONNECTION_STRING=kurrentdb://127.0.0.1:2113?tls=false
-```
-
-To point at the local real KurrentDB instance instead:
-
-```bash
-KURRENTDB_CONNECTION_STRING=kurrentdb://127.0.0.1:2114?tls=false
-```
-
-Available playground scripts:
-
-```bash
-npm run playground:append-read
-npm run playground:filtered-read
-npm run playground:stream-metadata
-npm run playground:subscribe-all
+cd cli
+npm install
+npm run dev -- trace
+npm run bench:report
 ```
 
 ## Testing
 
-The shared contract suite lives in [test/contracts/streams-contract-suite.ts](c:\Users\micha\Repos\kurrentdb-adapter\test\contracts\streams-contract-suite.ts).
+The shared contract suite lives in [test/contracts/streams-contract-suite.ts](test/contracts/streams-contract-suite.ts).
 
 `npm run e2e:dev` boots the current app in-process against PostgreSQL in Testcontainers:
 
@@ -157,28 +139,19 @@ npm run generate
 npm run generate
 npm run build
 npm run container:build
-npm run container:run
-npm run start
 npm run start:dev
 npm run start:dev:env
-npm run start:debug
 npm run start:prod
 npm run db:up
 npm run db:down
 npm run kurrentdb:up
 npm run dev:up
 npm run dev:down
-npm run playground:append-read
-npm run playground:filtered-read
-npm run playground:stream-metadata
-npm run playground:subscribe-all
 npm run lint
 npm run lint:fix
 npm run test
-npm run test:cov
 npm run e2e
 npm run e2e:dev
-npm run bench:report
 ```
 
 ## Current Contract Coverage

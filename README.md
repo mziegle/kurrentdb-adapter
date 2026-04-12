@@ -4,7 +4,7 @@
 
 It is intended for users who want to point the official KurrentDB client at this service and work with a compatible subset of stream operations without running a full KurrentDB node.
 
-Development and contributor information lives in [CONTRIBUTING.md](c:\Users\micha\Repos\kurrentdb-adapter\CONTRIBUTING.md).
+Development and contributor information lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## What It Supports
 
@@ -26,7 +26,7 @@ Development and contributor information lives in [CONTRIBUTING.md](c:\Users\mich
 - Retention rules affect stream reads immediately, but hidden records can remain visible in `$all` until scavenging runs.
 - The adapter follows the KurrentDB rule that truncation metadata alone does not scavenge a stream down to absolute emptiness.
 
-More scavenging detail is documented in [docs/scavenging.md](c:\Users\micha\Repos\kurrentdb-adapter\docs\scavenging.md).
+More scavenging detail is documented in [docs/scavenging.md](docs/scavenging.md).
 
 ## Limitations
 

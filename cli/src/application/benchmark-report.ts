@@ -1,11 +1,11 @@
-import { hrtime } from 'node:process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { hrtime } from 'node:process';
 import {
   FORWARDS,
+  KurrentDBClient,
   START,
   jsonEvent,
-  KurrentDBClient,
 } from '@kurrent/kurrentdb-client';
 
 type Target = {
@@ -540,7 +540,7 @@ function createHtmlReport(report: BenchmarkReport): string {
 </html>`;
 }
 
-async function main(): Promise<void> {
+export async function runBenchmarkReport(): Promise<void> {
   const outputDir = resolve(process.cwd(), 'benchmark', 'reports');
   await mkdir(outputDir, { recursive: true });
 
@@ -583,8 +583,3 @@ async function main(): Promise<void> {
   console.log(`JSON report: ${jsonPath}`);
   console.log(`HTML report: ${htmlPath}`);
 }
-
-void main().catch((error: unknown) => {
-  console.error('Benchmark failed:', error);
-  process.exitCode = 1;
-});

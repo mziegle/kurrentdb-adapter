@@ -9,6 +9,7 @@ import {
   runReadTest,
   runSubscribeTest,
 } from '../application/test-cases.js';
+import { runBenchmarkReport } from '../application/benchmark-report.js';
 import { runTraceProxy } from '../application/trace.js';
 import { runTui } from '../tui/app.js';
 
@@ -92,6 +93,7 @@ function printHelp(): void {
 
 Usage:
   kcli ping [--backend <adapter|reference>] [--json]
+  kcli bench report
   kcli trace [--proxy-port <port>] [--proxy-host <host>] [--upstream-port <port>] [--upstream-host <host>] [--verbose <info|debug>] [--suppress-http-paths <paths>] [--suppress-http2-frame-types <types>] [--suppress-http1-headers] [--suppress-http1-bodies] [--no-default-suppressions]
   kcli stream read <stream> [--from <revision>] [--limit <count>] [--backend <adapter|reference>] [--json]
   kcli stream append <stream> --type <event-type> --data <json> [--metadata <json>] [--expected-revision <any|no_stream|stream_exists|revision>] [--backend <adapter|reference>] [--json]
@@ -155,6 +157,11 @@ export async function runProgram(argv: string[]): Promise<void> {
         ? false
         : undefined,
     });
+    return;
+  }
+
+  if (group === 'bench' && action === 'report') {
+    await runBenchmarkReport();
     return;
   }
 
