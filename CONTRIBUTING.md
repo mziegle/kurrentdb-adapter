@@ -75,14 +75,17 @@ npm run start:prod
 
 ## Developer CLI
 
-The developer CLI lives in [`cli/`](cli) and owns tracing, comparison, and benchmark workflows.
+The developer CLI lives in [`cli/`](cli) and should be the default tool for agent-led testing, tracing, debugging, comparison, and benchmark workflows when it covers the task.
 
 Examples:
 
 ```bash
 cd cli
 npm install
+npm run dev -- ping
+npm run dev -- test append
 npm run dev -- trace
+npm run dev -- config show
 npm run bench:report
 ```
 
@@ -101,10 +104,9 @@ npm run e2e:dev -- --runInBand
 1. the locally built adapter container image
 2. a real KurrentDB target
 
-Build the adapter image first:
+The `container` pass builds the local adapter image automatically:
 
 ```bash
-npm run container:build
 npm run e2e -- --runInBand
 ```
 
