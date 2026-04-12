@@ -85,7 +85,10 @@ kcli bench report
 ```
 
 This writes JSON and HTML reports under `benchmark/reports/` from the current
-working directory.
+working directory. It benchmarks the default endpoint from `KDB_CONNECTION`
+or the built-in default `kurrentdb://127.0.0.1:2113?tls=false`, and compares it
+to `KDB_COMPARE_CONNECTION` or the built-in compare default
+`kurrentdb://127.0.0.1:2114?tls=false`.
 
 ### Stream read
 

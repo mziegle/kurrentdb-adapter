@@ -59,14 +59,24 @@ type BenchmarkReport = {
 
 const DEFAULT_TARGETS: Target[] = [
   {
-    name: process.env.BENCH_ADAPTER_NAME ?? 'Adapter',
+    name:
+      process.env.BENCH_TARGET_NAME ??
+      process.env.BENCH_ADAPTER_NAME ??
+      'Endpoint',
     connectionString:
+      process.env.BENCH_TARGET_CONNECTION_STRING ??
+      process.env.KDB_CONNECTION ??
       process.env.BENCH_ADAPTER_CONNECTION_STRING ??
       'kurrentdb://127.0.0.1:2113?tls=false',
   },
   {
-    name: process.env.BENCH_KURRENTDB_NAME ?? 'KurrentDB',
+    name:
+      process.env.BENCH_COMPARE_NAME ??
+      process.env.BENCH_KURRENTDB_NAME ??
+      'Compare Endpoint',
     connectionString:
+      process.env.BENCH_COMPARE_CONNECTION_STRING ??
+      process.env.KDB_COMPARE_CONNECTION ??
       process.env.BENCH_KURRENTDB_CONNECTION_STRING ??
       'kurrentdb://127.0.0.1:2114?tls=false',
   },
@@ -472,7 +482,7 @@ function createHtmlReport(report: BenchmarkReport): string {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>KurrentDB Adapter Benchmark Report</title>
+    <title>KurrentDB Benchmark Report</title>
     <style>
       body { font-family: Inter, Arial, sans-serif; margin: 24px; color: #0f172a; background: #f8fafc; }
       h1, h2 { margin-bottom: 8px; }
@@ -485,7 +495,7 @@ function createHtmlReport(report: BenchmarkReport): string {
     </style>
   </head>
   <body>
-    <h1>KurrentDB Adapter Benchmark</h1>
+    <h1>KurrentDB Benchmark</h1>
     <p class="meta" id="meta"></p>
     <div id="overview" class="card"></div>
     <div id="details"></div>
