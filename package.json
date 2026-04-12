@@ -20,7 +20,7 @@
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start:dev": "nest start --watch",
     "start:dev:env": "docker compose up -d postgres kurrentdb && npm run start:dev",
-    "start:prod": "node dist/main",
+    "start:prod": "node dist/src/main",
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose down",
     "kurrentdb:up": "docker compose up -d kurrentdb",

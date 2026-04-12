@@ -416,7 +416,6 @@ export class PostgresEventStoreService
       const streamName = decodeStreamName(
         options.stream.streamIdentifier.streamName,
       );
-      await this.ensureStreamIsNotTombstoned(streamName);
       return this.readStreamSnapshot(streamName, options);
     }
 
@@ -1015,10 +1014,7 @@ export class PostgresEventStoreService
       return this.protocol.createExistingEmptyStreamReadResponses(options);
     }
 
-    const streamState = await this.getStreamRetentionPolicy(
-      this.pool,
-      streamName,
-    );
+    const streamState = await this.getReadStreamSnapshotState(streamName);
     if (getReadableCurrentRevision(streamState) === null) {
       return [
         {
@@ -1076,6 +1072,91 @@ export class PostgresEventStoreService
     );
 
     return result.rows.map((row) => this.protocol.mapRowToReadResponse(row));
+  }
+
+  private async getReadStreamSnapshotState(
+    streamName: string,
+  ): Promise<StreamRetentionPolicy> {
+    const result = await this.pool.query<
+      StreamStateRow & {
+        fallback_generation: string | number | null;
+        fallback_revision: string | number | null;
+        is_tombstoned: boolean;
+        max_age: string | number | null;
+        max_count: string | number | null;
+        truncate_before: string | number | null;
+      }
+    >(
+      `
+        SELECT
+          EXISTS(
+            SELECT 1
+            FROM tombstoned_streams tombstones
+            WHERE tombstones.stream_name = $1
+          ) AS is_tombstoned,
+          retention.current_generation,
+          retention.current_revision,
+          retention.deleted_at,
+          retention.max_age,
+          retention.max_count,
+          retention.truncate_before,
+          latest.stream_generation AS fallback_generation,
+          latest.stream_revision AS fallback_revision
+        FROM (SELECT 1) seed
+        LEFT JOIN stream_retention_policies retention
+          ON retention.stream_name = $1
+        LEFT JOIN LATERAL (
+          SELECT stream_generation, stream_revision
+          FROM stream_events
+          WHERE stream_name = $1
+          ORDER BY stream_generation DESC, stream_revision DESC
+          LIMIT 1
+        ) latest ON TRUE
+      `,
+      [streamName],
+    );
+
+    const row = result.rows[0];
+
+    if (row.is_tombstoned) {
+      throw new StreamDeletedServiceError(streamName);
+    }
+
+    if (
+      row.current_generation !== null &&
+      row.current_generation !== undefined
+    ) {
+      return {
+        currentGeneration: toNumber(row.current_generation),
+        currentRevision:
+          row.current_revision === null ? null : toNumber(row.current_revision),
+        deletedAt: row.deleted_at,
+        maxAge: row.max_age === null ? null : toNumber(row.max_age),
+        maxCount: row.max_count === null ? null : toNumber(row.max_count),
+        truncateBefore:
+          row.truncate_before === null ? null : toNumber(row.truncate_before),
+      };
+    }
+
+    if (row.fallback_generation === null || row.fallback_revision === null) {
+      return {
+        currentGeneration: 0,
+        currentRevision: null,
+        deletedAt: null,
+        maxAge: null,
+        maxCount: null,
+        truncateBefore: null,
+      };
+    }
+
+    return {
+      currentGeneration: toNumber(row.fallback_generation),
+      currentRevision: toNumber(row.fallback_revision),
+      deletedAt: null,
+      maxAge: null,
+      maxCount: null,
+      truncateBefore: null,
+    };
   }
 
   private async readAllSnapshot(
