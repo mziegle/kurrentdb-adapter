@@ -12,17 +12,24 @@ import {
 import { runBenchmarkReport } from '../application/benchmark-report.js';
 import { runTraceProxy } from '../application/trace.js';
 import { runTui } from '../tui/app.js';
+import packageJson from '../../package.json' with { type: 'json' };
 
 interface ParsedArgs {
   backend?: BackendName;
   help: boolean;
   json: boolean;
   positionals: string[];
+  version: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
   const positionals: string[] = [];
-  const parsed: ParsedArgs = { help: false, json: false, positionals };
+  const parsed: ParsedArgs = {
+    help: false,
+    json: false,
+    positionals,
+    version: false,
+  };
 
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
@@ -34,6 +41,11 @@ function parseArgs(argv: string[]): ParsedArgs {
 
     if (value === '--json') {
       parsed.json = true;
+      continue;
+    }
+
+    if (value === '--version' || value === '-v') {
+      parsed.version = true;
       continue;
     }
 
@@ -112,6 +124,11 @@ Config:
 export async function runProgram(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv);
   const [group, action, target] = parsed.positionals;
+
+  if (parsed.version) {
+    console.log(packageJson.version);
+    return;
+  }
 
   if (parsed.help || group === 'help' || !group) {
     printHelp();
