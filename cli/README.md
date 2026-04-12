@@ -82,10 +82,12 @@ kcli ping
 
 ```bash
 kcli bench report
+kcli bench report benchmark/reports
 ```
 
-This writes JSON and HTML reports under `benchmark/reports/` from the current
-working directory. It benchmarks the default endpoint from `KDB_CONNECTION`
+This writes JSON and HTML reports to the current working directory by default.
+You can pass an output path to write them somewhere else, for example
+`benchmark/reports/`. It benchmarks the default endpoint from `KDB_CONNECTION`
 or the built-in default `kurrentdb://127.0.0.1:2113?tls=false`, and compares it
 to `KDB_COMPARE_CONNECTION` or the built-in compare default
 `kurrentdb://127.0.0.1:2114?tls=false`.

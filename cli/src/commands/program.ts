@@ -174,9 +174,10 @@ function getHelpText(commandKey?: CommandKey): string {
 
 Checks connectivity to the configured KurrentDB endpoint.`,
     'bench report': `Usage:
-  kcli bench report
+  kcli bench report [output-path]
 
-Runs the benchmark report workflow and writes reports under benchmark/reports/.
+Runs the benchmark report workflow and writes reports to the current directory by default.
+Provide output-path to write reports somewhere else.
 Uses KDB_CONNECTION for the primary endpoint and KDB_COMPARE_CONNECTION for the comparison endpoint.`,
     trace: `Usage:
   kcli trace [--proxy-port <port>] [--proxy-host <host>] [--upstream-port <port>] [--upstream-host <host>] [--verbose <info|debug>] [--suppress-http-paths <paths>] [--suppress-http2-frame-types <types>] [--suppress-http1-headers] [--suppress-http1-bodies] [--no-default-suppressions]
@@ -237,7 +238,7 @@ Prints the effective endpoint configuration and where each value came from.`,
 
 Usage:
   kcli ping [--json]
-  kcli bench report
+  kcli bench report [output-path]
   kcli trace [--proxy-port <port>] [--proxy-host <host>] [--upstream-port <port>] [--upstream-host <host>] [--verbose <info|debug>] [--suppress-http-paths <paths>] [--suppress-http2-frame-types <types>] [--suppress-http1-headers] [--suppress-http1-bodies] [--no-default-suppressions]
   kcli stream read <stream> [--from <revision>] [--limit <count>] [--json]
   kcli stream append <stream> --type <event-type> --data <json|@file|-> [--metadata <json|@file|->] [--expected-revision <any|no_stream|stream_exists|revision>] [--json]
@@ -469,7 +470,7 @@ export async function runProgram(argv: string[]): Promise<void> {
 
   if (group === 'bench' && action === 'report') {
     validateOptions(parsed.positionals.slice(2), 'bench report', []);
-    await runBenchmarkReport();
+    await runBenchmarkReport(target);
     return;
   }
 

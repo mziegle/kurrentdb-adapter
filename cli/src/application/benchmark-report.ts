@@ -550,8 +550,8 @@ function createHtmlReport(report: BenchmarkReport): string {
 </html>`;
 }
 
-export async function runBenchmarkReport(): Promise<void> {
-  const outputDir = resolve(process.cwd(), 'benchmark', 'reports');
+export async function runBenchmarkReport(outputPath = '.'): Promise<void> {
+  const outputDir = resolve(process.cwd(), outputPath);
   await mkdir(outputDir, { recursive: true });
 
   const results: ScenarioResult[] = [];
