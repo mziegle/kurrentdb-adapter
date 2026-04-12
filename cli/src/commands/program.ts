@@ -10,7 +10,10 @@ import {
   runReadTest,
   runSubscribeTest,
 } from '../application/test-cases.js';
-import { runBenchmarkReport } from '../application/benchmark-report.js';
+import {
+  runBenchmarkReport,
+  type BenchmarkMode,
+} from '../application/benchmark-report.js';
 import { runTraceProxy } from '../application/trace.js';
 import { runTui } from '../tui/app.js';
 
@@ -122,6 +125,14 @@ function parseLimit(value: string | undefined): number {
   return parsed;
 }
 
+function parseBenchmarkMode(positionals: string[]): BenchmarkMode {
+  return positionals.includes('--fast') ? 'fast' : 'default';
+}
+
+function parseBenchmarkOutputPath(positionals: string[]): string | undefined {
+  return positionals.find((value) => !value.startsWith('-'));
+}
+
 function validateOptions(
   positionals: string[],
   commandKey: CommandKey,
@@ -174,10 +185,11 @@ function getHelpText(commandKey?: CommandKey): string {
 
 Checks connectivity to the configured KurrentDB endpoint.`,
     'bench report': `Usage:
-  kcli bench report [output-path]
+  kcli bench report [output-path] [--fast]
 
 Runs the benchmark report workflow and writes reports to the current directory by default.
 Provide output-path to write reports somewhere else.
+Use --fast for a scaled-down benchmark run intended for quick feedback.
 Uses KDB_CONNECTION for the primary endpoint and KDB_COMPARE_CONNECTION for the comparison endpoint.`,
     trace: `Usage:
   kcli trace [--proxy-port <port>] [--proxy-host <host>] [--upstream-port <port>] [--upstream-host <host>] [--verbose <info|debug>] [--suppress-http-paths <paths>] [--suppress-http2-frame-types <types>] [--suppress-http1-headers] [--suppress-http1-bodies] [--no-default-suppressions]
@@ -238,7 +250,7 @@ Prints the effective endpoint configuration and where each value came from.`,
 
 Usage:
   kcli ping [--json]
-  kcli bench report [output-path]
+  kcli bench report [output-path] [--fast]
   kcli trace [--proxy-port <port>] [--proxy-host <host>] [--upstream-port <port>] [--upstream-host <host>] [--verbose <info|debug>] [--suppress-http-paths <paths>] [--suppress-http2-frame-types <types>] [--suppress-http1-headers] [--suppress-http1-bodies] [--no-default-suppressions]
   kcli stream read <stream> [--from <revision>] [--limit <count>] [--json]
   kcli stream append <stream> --type <event-type> --data <json|@file|-> [--metadata <json|@file|->] [--expected-revision <any|no_stream|stream_exists|revision>] [--json]
@@ -469,8 +481,11 @@ export async function runProgram(argv: string[]): Promise<void> {
   }
 
   if (group === 'bench' && action === 'report') {
-    validateOptions(parsed.positionals.slice(2), 'bench report', []);
-    await runBenchmarkReport(target);
+    validateOptions(parsed.positionals.slice(2), 'bench report', [], ['--fast']);
+    await runBenchmarkReport(
+      parseBenchmarkOutputPath(parsed.positionals.slice(2)),
+      parseBenchmarkMode(parsed.positionals),
+    );
     return;
   }
 

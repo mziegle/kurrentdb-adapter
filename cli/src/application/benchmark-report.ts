@@ -52,10 +52,13 @@ type ScenarioResult = {
 type BenchmarkReport = {
   generatedAt: string;
   nodeVersion: string;
+  mode: BenchmarkMode;
   targets: Target[];
   scenarios: Scenario[];
   results: ScenarioResult[];
 };
+
+export type BenchmarkMode = 'default' | 'fast';
 
 const DEFAULT_TARGETS: Target[] = [
   {
@@ -135,6 +138,24 @@ const SCENARIOS: Scenario[] = [
     warmupOperations: 40,
   },
 ];
+
+function createScenarios(mode: BenchmarkMode): Scenario[] {
+  if (mode === 'default') {
+    return SCENARIOS;
+  }
+
+  return SCENARIOS.map((scenario) => ({
+    ...scenario,
+    streamCount: Math.max(1, Math.ceil(scenario.streamCount / 2)),
+    eventsPerStream: Math.max(50, Math.ceil(scenario.eventsPerStream / 10)),
+    concurrency: Math.max(1, Math.ceil(scenario.concurrency / 2)),
+    readMaxCount:
+      scenario.readMaxCount === undefined
+        ? undefined
+        : Math.max(25, Math.ceil(scenario.readMaxCount / 4)),
+    warmupOperations: Math.max(5, Math.ceil(scenario.warmupOperations / 5)),
+  }));
+}
 
 function formatNumber(value: number, digits = 2): string {
   return value.toLocaleString('en-US', {
@@ -550,14 +571,18 @@ function createHtmlReport(report: BenchmarkReport): string {
 </html>`;
 }
 
-export async function runBenchmarkReport(outputPath = '.'): Promise<void> {
+export async function runBenchmarkReport(
+  outputPath = '.',
+  mode: BenchmarkMode = 'default',
+): Promise<void> {
   const outputDir = resolve(process.cwd(), outputPath);
+  const scenarios = createScenarios(mode);
   await mkdir(outputDir, { recursive: true });
 
   const results: ScenarioResult[] = [];
-  console.log('Starting benchmark suite...');
+  console.log(`Starting benchmark suite (${mode} mode)...`);
 
-  for (const scenario of SCENARIOS) {
+  for (const scenario of scenarios) {
     console.log(`\nScenario: ${scenario.title}`);
     console.log(`Description: ${scenario.description}`);
 
@@ -577,8 +602,9 @@ export async function runBenchmarkReport(outputPath = '.'): Promise<void> {
   const report: BenchmarkReport = {
     generatedAt: new Date().toISOString(),
     nodeVersion: process.version,
+    mode,
     targets: DEFAULT_TARGETS,
-    scenarios: SCENARIOS,
+    scenarios,
     results,
   };
 
