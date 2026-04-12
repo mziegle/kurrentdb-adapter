@@ -5,6 +5,8 @@
 - Use repo-local paths and relative references in docs, comments, and skills.
 - Do not use global filesystem paths such as `C:\Users\...` in repo content unless the user explicitly asks for them.
 - This repo is a NestJS gRPC adapter that exposes the KurrentDB/EventStore `Streams` service.
+- The repo-local CLI `kcli` should be the default tool for agent-led testing, tracing, and debugging when it covers the workflow.
+- If testing, tracing, or debugging a behavior feels awkward through the current CLI, prefer proposing or implementing CLI improvements instead of reaching immediately for one-off scripts or lower-level tooling.
 - Persistence is backed by PostgreSQL in [src/postgres-event-store.service.ts](c:/Users/User/source/repos/kurrentdb-adapter/src/postgres-event-store.service.ts).
 - E2E coverage is in [test/streams.e2e-spec.ts](c:/Users/User/source/repos/kurrentdb-adapter/test/streams.e2e-spec.ts) and uses Testcontainers with Docker.
 
@@ -52,13 +54,6 @@
   stale expected revision rejection
   missing stream read
   multi-event append ordering
-
-## Good next tests
-
-- backward reads return newest-first
-- reads from a specific revision return the correct slice
-- persistence still works after restarting the app against the same Postgres container
-- eventually `Delete`, `Tombstone`, and `BatchAppend` once those RPCs exist
 
 ## High-risk areas
 
