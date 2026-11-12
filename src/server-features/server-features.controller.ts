@@ -19,6 +19,10 @@ const USERS_SERVICE_NAME = 'event_store.client.users.users';
 
 @Controller()
 export class ServerFeaturesController {
+  private readonly mongoBackend = process.env.EVENT_STORE_BACKEND === 'mongodb';
+  private readonly mongoScavengeEnabled =
+    process.env.MONGODB_UNSAFE_ENABLE_SCAVENGE === 'true';
+
   @GrpcMethod('ServerFeatures', 'getSupportedMethods')
   getSupportedMethods(_: unknown, metadata?: Metadata): SupportedMethods {
     const response = {
@@ -98,7 +102,18 @@ export class ServerFeaturesController {
           'getsupportedmethods',
           SERVER_FEATURES_SERVICE_NAME,
         ),
-      ],
+      ].filter(
+        (method) =>
+          !this.mongoBackend ||
+          (method.serviceName !== PERSISTENT_SUBSCRIPTIONS_SERVICE_NAME &&
+            method.serviceName !== MONITORING_SERVICE_NAME &&
+            method.serviceName !== USERS_SERVICE_NAME &&
+            (method.serviceName !== OPERATIONS_SERVICE_NAME ||
+              (this.mongoScavengeEnabled &&
+                ['startscavenge', 'stopscavenge'].includes(
+                  method.methodName,
+                )))),
+      ),
     };
 
     logHotPath('gRPC ServerFeatures.GetSupportedMethods', {

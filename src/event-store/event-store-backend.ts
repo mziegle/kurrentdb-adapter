@@ -30,17 +30,36 @@ export type EventStoreStatsSnapshot = {
   totalEvents: number;
 };
 
+/** Cancellation is advisory: it does not imply a write was rolled back. */
+export interface WriteRequestContext {
+  signal: AbortSignal;
+  /** Absolute Unix time in milliseconds, when finite. */
+  deadline?: number;
+}
+
 export interface EventStoreBackend {
   getStatsSnapshot(): Promise<EventStoreStatsSnapshot>;
-  append(messages: AppendReq[]): Promise<AppendResp>;
-  batchAppend(requests: BatchAppendReq[]): Promise<BatchAppendResp>;
+  append(
+    messages: AppendReq[],
+    context?: WriteRequestContext,
+  ): Promise<AppendResp>;
+  batchAppend(
+    requests: BatchAppendReq[],
+    context?: WriteRequestContext,
+  ): Promise<BatchAppendResp>;
   read(request: ReadReq): Promise<ReadResp[]>;
   subscribeToStream(
     request: ReadReq,
     isCancelled: () => boolean,
   ): AsyncIterable<ReadResp>;
-  delete(request: DeleteReq): Promise<DeleteResp>;
-  tombstone(request: TombstoneReq): Promise<TombstoneResp>;
+  delete(
+    request: DeleteReq,
+    context?: WriteRequestContext,
+  ): Promise<DeleteResp>;
+  tombstone(
+    request: TombstoneReq,
+    context?: WriteRequestContext,
+  ): Promise<TombstoneResp>;
   startScavenge(request: StartScavengeReq): ScavengeResp;
   stopScavenge(request: StopScavengeReq): ScavengeResp;
 }

@@ -13,7 +13,8 @@ import {
   EVENT_STORE_BACKEND,
   EventStoreBackend,
 } from '../event-store/event-store-backend';
-import { Metadata } from '@grpc/grpc-js';
+import { Metadata, status } from '@grpc/grpc-js';
+import { RpcException } from '@nestjs/microservices';
 import {
   extractGrpcMetadata,
   logHotPath,
@@ -43,6 +44,16 @@ export class OperationsController implements OperationsControllerContract {
       return response;
     } catch (error: unknown) {
       operation.failed();
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        error.code === status.UNIMPLEMENTED
+      ) {
+        throw new RpcException({
+          code: status.UNIMPLEMENTED,
+          message: error.message,
+        });
+      }
       throw error;
     }
   }

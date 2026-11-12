@@ -206,6 +206,30 @@ export class PostgresProtocolService {
     };
   }
 
+  createBatchAppendUnknownStatus(
+    message = 'Append outcome is unknown; the write may have committed.',
+  ): BatchAppendResp['error'] {
+    return {
+      code: Code.UNKNOWN,
+      message,
+      details: this.createStatusDetails(
+        'event_store.client.Unknown',
+        new Uint8Array(),
+      ),
+    };
+  }
+
+  createBatchAppendTimeoutStatus(): BatchAppendResp['error'] {
+    return {
+      code: Code.DEADLINE_EXCEEDED,
+      message: 'Append deadline exceeded before dispatch.',
+      details: this.createStatusDetails(
+        'event_store.client.Timeout',
+        new Uint8Array(),
+      ),
+    };
+  }
+
   private createStatusDetails(
     typeName: string,
     value: Uint8Array,

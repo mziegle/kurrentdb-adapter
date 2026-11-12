@@ -24,7 +24,8 @@ import {
   createPersistentListResponse,
   createPersistentReadStream,
 } from '../stub-utils';
-import { Metadata } from '@grpc/grpc-js';
+import { Metadata, status } from '@grpc/grpc-js';
+import { RpcException } from '@nestjs/microservices';
 import {
   extractGrpcMetadata,
   logHotPath,
@@ -35,6 +36,7 @@ import {
 @PersistentSubscriptionsControllerMethods()
 export class PersistentSubscriptionsController implements PersistentSubscriptionsControllerContract {
   create(request: CreateReq, metadata?: Metadata): CreateResp {
+    this.rejectMongoStub();
     logHotPath('gRPC PersistentSubscriptions.Create', {
       summary:
         [
@@ -52,6 +54,7 @@ export class PersistentSubscriptionsController implements PersistentSubscription
   }
 
   update(request: UpdateReq, metadata?: Metadata): UpdateResp {
+    this.rejectMongoStub();
     logHotPath('gRPC PersistentSubscriptions.Update', {
       summary:
         [
@@ -69,6 +72,7 @@ export class PersistentSubscriptionsController implements PersistentSubscription
   }
 
   delete(request: DeleteReq, metadata?: Metadata): DeleteResp {
+    this.rejectMongoStub();
     logHotPath('gRPC PersistentSubscriptions.Delete', {
       summary:
         [
@@ -89,6 +93,7 @@ export class PersistentSubscriptionsController implements PersistentSubscription
     request: Observable<ReadReq>,
     metadata?: Metadata,
   ): Observable<ReadResp> {
+    this.rejectMongoStub();
     logHotPath('gRPC PersistentSubscriptions.Read', {
       summary: summarizeGrpcMetadata(metadata),
       trace: {
@@ -100,6 +105,7 @@ export class PersistentSubscriptionsController implements PersistentSubscription
   }
 
   getInfo(request: GetInfoReq, metadata?: Metadata): GetInfoResp {
+    this.rejectMongoStub();
     logHotPath('gRPC PersistentSubscriptions.GetInfo', {
       summary: [
         summarizeGrpcMetadata(metadata),
@@ -119,6 +125,7 @@ export class PersistentSubscriptionsController implements PersistentSubscription
     request: ReplayParkedReq,
     metadata?: Metadata,
   ): ReplayParkedResp {
+    this.rejectMongoStub();
     logHotPath('gRPC PersistentSubscriptions.ReplayParked', {
       summary: summarizeGrpcMetadata(metadata),
       trace: {
@@ -130,6 +137,7 @@ export class PersistentSubscriptionsController implements PersistentSubscription
   }
 
   list(request: ListReq, metadata?: Metadata): ListResp {
+    this.rejectMongoStub();
     logHotPath('gRPC PersistentSubscriptions.List', {
       summary:
         [summarizeGrpcMetadata(metadata), this.summarizeListRequest(request)]
@@ -144,6 +152,7 @@ export class PersistentSubscriptionsController implements PersistentSubscription
   }
 
   restartSubsystem(request: Empty, metadata?: Metadata): Empty {
+    this.rejectMongoStub();
     logHotPath('gRPC PersistentSubscriptions.RestartSubsystem', {
       summary: summarizeGrpcMetadata(metadata),
       trace: {
@@ -152,6 +161,15 @@ export class PersistentSubscriptionsController implements PersistentSubscription
       },
     });
     return {};
+  }
+
+  private rejectMongoStub(): void {
+    if (process.env.EVENT_STORE_BACKEND === 'mongodb') {
+      throw new RpcException({
+        code: status.UNIMPLEMENTED,
+        message: 'Persistent subscriptions are unsupported on MongoDB',
+      });
+    }
   }
 
   private summarizeCreateOrUpdateRequest(

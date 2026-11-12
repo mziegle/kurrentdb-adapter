@@ -53,7 +53,7 @@ type BenchmarkReport = {
   generatedAt: string;
   nodeVersion: string;
   mode: BenchmarkMode;
-  targets: Target[];
+  targets: Array<{ name: string }>;
   scenarios: Scenario[];
   results: ScenarioResult[];
 };
@@ -461,7 +461,12 @@ async function runScenario(
       );
     }
 
-    await warmup(client, scenario, streamNames, payload);
+    const warmupStream = uniqueStreamName(
+      target.name.toLowerCase(),
+      `${scenario.id}-warmup`,
+      0,
+    );
+    await warmup(client, scenario, [warmupStream], payload);
 
     const rawResult =
       scenario.kind === 'append'
@@ -533,7 +538,7 @@ function createHtmlReport(report: BenchmarkReport): string {
       const overview = document.getElementById('overview');
       overview.innerHTML = [
         '<h2>Overview</h2>',
-        '<p>Targets: ' + report.targets.map((t) => t.name + ' (' + t.connectionString + ')').join(' vs ') + '</p>',
+        '<p>Targets: ' + report.targets.map((t) => t.name).join(' vs ') + '</p>',
         '<p>Scenarios: ' + report.scenarios.length + '</p>',
       ].join('');
 
@@ -587,9 +592,7 @@ export async function runBenchmarkReport(
     console.log(`Description: ${scenario.description}`);
 
     for (const target of DEFAULT_TARGETS) {
-      console.log(
-        `Running target: ${target.name} (${target.connectionString})`,
-      );
+      console.log(`Running target: ${target.name}`);
       const result = await runScenario(target, scenario);
       results.push(result);
 
@@ -603,7 +606,7 @@ export async function runBenchmarkReport(
     generatedAt: new Date().toISOString(),
     nodeVersion: process.version,
     mode,
-    targets: DEFAULT_TARGETS,
+    targets: DEFAULT_TARGETS.map(({ name }) => ({ name })),
     scenarios,
     results,
   };

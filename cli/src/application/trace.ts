@@ -57,6 +57,7 @@ type PendingDedupLog = {
 type HttpHeaders = Record<string, string | string[]>;
 
 const HTTP2_CLIENT_PREFACE = Buffer.from('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n');
+const MAX_DECOMPRESSED_GRPC_BYTES = 4 * 1024 * 1024;
 
 const HTTP2_FRAME_TYPES: Record<number, string> = {
   0x0: 'DATA',
@@ -98,11 +99,11 @@ export async function runTraceProxy(options: TraceOptions): Promise<void> {
 
   await new Promise<void>((resolve, reject) => {
     tracer.server.once('close', resolve);
-    tracer.server.once('error', reject);
+    tracer.server.once('error', () => reject(new Error('Trace proxy server error')));
   });
 }
 
-function createTracer(options: TraceOptions): {
+export function createTracer(options: TraceOptions): {
   close: () => Promise<void>;
   listen: () => Promise<void>;
   server: Server;
@@ -112,7 +113,6 @@ function createTracer(options: TraceOptions): {
   const publicHost = options.proxyHost ?? process.env.TRACE_PROXY_HOST ?? '127.0.0.1';
   const upstreamPort = Number(options.upstreamPort ?? process.env.TRACE_UPSTREAM_PORT ?? '2114');
   const upstreamHost = options.upstreamHost ?? process.env.TRACE_UPSTREAM_HOST ?? '127.0.0.1';
-  const maxBodyBytes = Number(process.env.TRACE_MAX_BODY_BYTES ?? '4096');
   const dedupeWindowMs = Number(process.env.TRACE_DEDUPE_WINDOW_MS ?? '1000');
   const traceVerbosity = (options.verbosity ?? process.env.TRACE_VERBOSITY ?? 'info').toLowerCase();
   const useDefaultSuppressions = options.useDefaultSuppressions ?? process.env.TRACE_USE_DEFAULT_SUPPRESSIONS !== '0';
@@ -124,10 +124,7 @@ function createTracer(options: TraceOptions): {
     options.suppressHttp2FrameTypes ?? process.env.TRACE_SUPPRESS_HTTP2_FRAME_TYPES,
     useDefaultSuppressions ? ['settings', 'window_update', 'ping'] : [],
   );
-  const suppressHttp1Headers =
-    options.suppressHttp1Headers ?? process.env.TRACE_SUPPRESS_HTTP1_HEADERS === '1';
-  const suppressHttp1Bodies =
-    options.suppressHttp1Bodies ?? process.env.TRACE_SUPPRESS_HTTP1_BODIES === '1';
+
   const grpcMethodDescriptors = loadGrpcMethodDescriptors(repoRoot);
   const pendingDedupLogs = new Map<string, PendingDedupLog>();
 
@@ -196,26 +193,6 @@ function createTracer(options: TraceOptions): {
 
   const isDebugVerbosity = (): boolean => traceVerbosity === 'debug';
 
-  const formatBody = (bodyBuffer: Buffer, headers: HttpHeaders): string => {
-    if (!bodyBuffer.length) {
-      return '';
-    }
-
-    const contentTypeHeader = headers['content-type'];
-    const contentType = Array.isArray(contentTypeHeader)
-      ? contentTypeHeader[0]
-      : contentTypeHeader;
-    const text = bodyBuffer.toString('utf8');
-
-    if (
-      typeof contentType === 'string' &&
-      contentType.includes('application/json')
-    ) {
-      return truncateText(tryParseJson(text), maxBodyBytes);
-    }
-
-    return truncateText(text, maxBodyBytes);
-  };
 
   const shouldSuppressHttp1 = (requestPath?: string): boolean =>
     Boolean(requestPath && suppressedHttpPaths.has(requestPath.toLowerCase()));
@@ -231,7 +208,7 @@ function createTracer(options: TraceOptions): {
   ): string[] => {
     const messages = parseGrpcMessages(payload);
     if (messages.length === 0) {
-      return isDebugVerbosity() ? [`dataPreview=${previewHex(payload)}`] : [];
+      return [];
     }
 
     const details: string[] = [];
@@ -258,18 +235,11 @@ function createTracer(options: TraceOptions): {
         grpcMethodDescriptors,
       );
       if (decoded) {
-        details.push(
-          `${labelPrefix} method=${decoded.label} body=\n${truncateText(
-            formatDecodedMessage(decoded.value, traceVerbosity),
-            2000,
-          )}`,
-        );
+        details.push(`${labelPrefix} method=${decoded.label}`);
         continue;
       }
 
-      details.push(
-        `${labelPrefix} undecoded hex=${previewHex(decompressed.message, 64)}`,
-      );
+      details.push(`${labelPrefix} undecoded`);
     }
 
     return details;
@@ -300,7 +270,7 @@ function createTracer(options: TraceOptions): {
     } else if (frame.type === 0x6) {
       details.push(`ack=${Boolean(frame.flags & 0x1)}`);
     } else if (frame.type === 0x7) {
-      details.push(describeGoawayFrame(frame.payload, maxBodyBytes));
+      details.push(describeGoawayFrame(frame.payload));
     } else if (frame.type === 0x8 && frame.payload.length >= 4) {
       details.push(
         `windowSizeIncrement=${frame.payload.readUInt32BE(0) & 0x7fffffff}`,
@@ -311,9 +281,6 @@ function createTracer(options: TraceOptions): {
       details.push(`headerBlockBytes=${frame.payload.length}`);
     }
 
-    if (details.length === 0 && frame.payload.length > 0 && isDebugVerbosity()) {
-      details.push(`hex=${previewHex(frame.payload)}`);
-    }
 
     if (!isDebugVerbosity()) {
       if ((frame.type === 0x1 || frame.type === 0x9) && details.length === 0) {
@@ -375,28 +342,12 @@ function createTracer(options: TraceOptions): {
       return;
     }
 
-    const bodyText = formatBody(bodyBuffer, headers);
-    const contentTypeHeader = headers['content-type'];
-    const contentType = Array.isArray(contentTypeHeader)
-      ? contentTypeHeader[0]
-      : contentTypeHeader ?? 'unknown';
+    const safeStartLine = direction === 'client->upstream'
+      ? `${requestMethod ?? '?'} [target omitted] HTTP/1.1`
+      : 'HTTP/1 response';
     const lines = [
-      `[trace] ${direction} ${clientAddress} ${startLine} content-type=${contentType} bytes=${bodyBuffer.length}`,
+      `[trace] ${direction} ${clientAddress} ${safeStartLine} bytes=${bodyBuffer.length}`,
     ];
-
-    if (
-      isDebugVerbosity() &&
-      !suppressHttp1Headers &&
-      Object.keys(headers).length > 0
-    ) {
-      lines.push(
-        `[trace] ${direction} ${clientAddress} headers=${JSON.stringify(headers)}`,
-      );
-    }
-
-    if (!suppressHttp1Bodies && bodyText) {
-      lines.push(`[trace] ${direction} ${clientAddress} body=\n${bodyText}`);
-    }
 
     const dedupeKey = createSignature([
       'http1',
@@ -409,8 +360,8 @@ function createTracer(options: TraceOptions): {
     ]);
     const summaryLabel =
       direction === 'client->upstream'
-        ? `${direction} ${requestMethod ?? '?'} ${requestPath ?? startLine}`
-        : `${direction} ${requestMethod ?? '?'} ${requestPath ?? '?'} -> ${startLine}`;
+        ? `${direction} ${requestMethod ?? '?'} [target omitted]`
+        : `${direction} ${requestMethod ?? '?'} HTTP/1 response`;
     logTrace(lines, dedupeKey, summaryLabel);
   };
 
@@ -447,7 +398,7 @@ function createTracer(options: TraceOptions): {
             );
           } else {
             console.info(
-              `[trace] ${direction} ${clientAddress} unknown ascii="${previewAscii(chunk)}" hex=${previewHex(chunk)}`,
+              `[trace] ${direction} ${clientAddress} unknown bytes=${chunk.length}`,
             );
             parser = { push() {} };
           }
@@ -480,12 +431,23 @@ function createTracer(options: TraceOptions): {
 
     clientSocket.on('data', (chunk) => {
       clientSniffer.push(chunk);
-      upstreamSocket.write(chunk);
+      if (!upstreamSocket.write(chunk)) clientSocket.pause();
     });
+
+    upstreamSocket.on('drain', () => clientSocket.resume());
 
     upstreamSocket.on('data', (chunk) => {
       upstreamSniffer.push(chunk);
-      clientSocket.write(chunk);
+      if (!clientSocket.write(chunk)) upstreamSocket.pause();
+    });
+
+    clientSocket.on('drain', () => upstreamSocket.resume());
+
+    clientSocket.on('close', () => {
+      if (!upstreamSocket.readableEnded) upstreamSocket.destroy();
+    });
+    upstreamSocket.on('close', () => {
+      if (!clientSocket.readableEnded) clientSocket.destroy();
     });
 
     clientSocket.on('end', () => {
@@ -497,12 +459,12 @@ function createTracer(options: TraceOptions): {
     });
 
     clientSocket.on('error', (error) => {
-      console.warn(`[trace] client error ${clientAddress} ${error.message}`);
+      console.warn(`[trace] client error ${clientAddress}`);
       upstreamSocket.destroy(error);
     });
 
     upstreamSocket.on('error', (error) => {
-      console.warn(`[trace] upstream error ${clientAddress} ${error.message}`);
+      console.warn(`[trace] upstream error ${clientAddress}`);
       clientSocket.destroy(error);
     });
   });
@@ -515,11 +477,11 @@ function createTracer(options: TraceOptions): {
         server.listen(publicPort, publicHost, () => {
           server.off('error', reject);
           console.info(
-            `[trace] proxy listening on ${publicHost}:${publicPort} -> ${upstreamHost}:${upstreamPort}`,
+            `[trace] proxy listening on port ${publicPort} -> upstream port ${upstreamPort}`,
           );
           resolve();
         });
-      });
+      }).catch(() => { throw new Error('Trace proxy could not listen'); });
     },
     async close(): Promise<void> {
       flushAllDedupLogs();
@@ -763,34 +725,6 @@ function exists(targetPath: string): boolean {
   }
 }
 
-function previewAscii(buffer: Buffer, length = 96): string {
-  return buffer
-    .subarray(0, length)
-    .toString('utf8')
-    .replace(/\r/g, '\\r')
-    .replace(/\n/g, '\\n');
-}
-
-function previewHex(buffer: Buffer, length = 24): string {
-  return buffer.subarray(0, length).toString('hex');
-}
-
-function tryParseJson(text: string): string {
-  try {
-    return JSON.stringify(JSON.parse(text), null, 2);
-  } catch {
-    return text;
-  }
-}
-
-function truncateText(text: string, maxLength: number): string {
-  if (text.length <= maxLength) {
-    return text;
-  }
-
-  return `${text.slice(0, maxLength)}\n... [truncated ${text.length - maxLength} chars]`;
-}
-
 function createSignature(parts: string[]): string {
   return createHash('sha1').update(parts.join('\n')).digest('hex');
 }
@@ -921,22 +855,14 @@ function decompressGrpcMessage(
     };
   }
 
-  try {
-    return { ok: true, message: zlib.gunzipSync(message) };
-  } catch {
-    // Try the next supported compression format.
-  }
-
-  try {
-    return { ok: true, message: zlib.inflateSync(message) };
-  } catch {
-    // Try the next supported compression format.
-  }
-
-  try {
-    return { ok: true, message: zlib.brotliDecompressSync(message) };
-  } catch {
-    // Fall through to the unsupported-compression result below.
+  for (const decompress of [zlib.gunzipSync, zlib.inflateSync, zlib.brotliDecompressSync]) {
+    try {
+      return { ok: true, message: decompress(message, { maxOutputLength: MAX_DECOMPRESSED_GRPC_BYTES }) };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE') {
+        return { ok: false, reason: 'decompressed message exceeds 4 MiB limit' };
+      }
+    }
   }
 
   return {
@@ -1049,111 +975,6 @@ function scoreDecodedValue(value: unknown): number {
   return 0;
 }
 
-function formatDecodedMessage(value: unknown, traceVerbosity: string): string {
-  const normalizedValue =
-    traceVerbosity === 'debug' ? value : simplifyDecodedValue(value);
-
-  return JSON.stringify(
-    normalizedValue,
-    (_key: string, currentValue: unknown) => {
-      if (Buffer.isBuffer(currentValue) || currentValue instanceof Uint8Array) {
-        const buffer = Buffer.from(currentValue);
-        if (buffer.length === 0) {
-          return 'Uint8Array(0)';
-        }
-
-        const ascii = buffer.toString('utf8');
-        const printable = /^[\x20-\x7e]+$/.test(ascii);
-        return printable
-          ? `Uint8Array(${buffer.length}) ascii=${JSON.stringify(ascii)}`
-          : `Uint8Array(${buffer.length}) hex=${buffer.toString('hex').slice(0, 96)}`;
-      }
-
-      return currentValue;
-    },
-    2,
-  );
-}
-
-function simplifyDecodedValue(value: unknown, key = ''): unknown {
-  if (value === null || value === undefined) {
-    return value;
-  }
-
-  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
-    return simplifyBinaryValue(Buffer.from(value), key);
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => simplifyDecodedValue(item));
-  }
-
-  if (typeof value === 'object') {
-    const output: Record<string, unknown> = {};
-    for (const [childKey, childValue] of Object.entries(
-      value as Record<string, unknown>,
-    )) {
-      output[childKey] = simplifyDecodedValue(childValue, childKey);
-    }
-    return output;
-  }
-
-  return value;
-}
-
-function simplifyBinaryValue(buffer: Buffer, key: string): unknown {
-  if (buffer.length === 0) {
-    return '';
-  }
-
-  const utf8 = buffer.toString('utf8');
-  const isMostlyPrintable = isPrintableText(utf8);
-  const lowerKey = key.toLowerCase();
-
-  if (
-    isMostlyPrintable &&
-    (lowerKey.includes('data') ||
-      lowerKey.includes('metadata') ||
-      lowerKey.includes('name'))
-  ) {
-    if (
-      (utf8.startsWith('{') && utf8.endsWith('}')) ||
-      (utf8.startsWith('[') && utf8.endsWith(']'))
-    ) {
-      try {
-        const parsed: unknown = JSON.parse(utf8);
-        return parsed;
-      } catch {
-        // Leave printable data as plain text when it is not valid JSON.
-      }
-    }
-
-    return utf8;
-  }
-
-  if (isMostlyPrintable) {
-    return utf8;
-  }
-
-  return `hex:${buffer.toString('hex')}`;
-}
-
-function isPrintableText(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const codePoint = value.charCodeAt(index);
-    const isTab = codePoint === 0x09;
-    const isLineFeed = codePoint === 0x0a;
-    const isCarriageReturn = codePoint === 0x0d;
-    const isPrintableAscii = codePoint >= 0x20 && codePoint <= 0x7e;
-
-    if (!isTab && !isLineFeed && !isCarriageReturn && !isPrintableAscii) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 function describeSettingsFrame(flags: number, payload: Buffer): string {
   if (flags & 0x1) {
     return 'ack=true';
@@ -1173,19 +994,12 @@ function describeSettingsFrame(flags: number, payload: Buffer): string {
   return `settings=${entries.join(', ')}`;
 }
 
-function describeGoawayFrame(payload: Buffer, maxBodyBytes: number): string {
+function describeGoawayFrame(payload: Buffer): string {
   if (payload.length < 8) {
     return `goawayBytes=${payload.length}`;
   }
 
   const lastStreamId = payload.readUInt32BE(0) & 0x7fffffff;
   const errorCode = payload.readUInt32BE(4);
-  const debugData =
-    payload.length > 8
-      ? truncateText(payload.subarray(8).toString('utf8'), Math.min(maxBodyBytes, 256))
-      : '';
-
-  return debugData
-    ? `lastStreamId=${lastStreamId} errorCode=${errorCode} debug=${JSON.stringify(debugData)}`
-    : `lastStreamId=${lastStreamId} errorCode=${errorCode}`;
+  return `lastStreamId=${lastStreamId} errorCode=${errorCode}`;
 }

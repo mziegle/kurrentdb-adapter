@@ -88,16 +88,6 @@ export function extractGrpcMetadata(
     return undefined;
   }
 
-  const rawMap = metadata.getMap?.();
-  if (rawMap) {
-    return Object.fromEntries(
-      Object.entries(rawMap).map(([key, value]) => [
-        toCamelCase(key),
-        normalizeMetadataValue(value),
-      ]),
-    );
-  }
-
   const connectionName = getFirstMetadataValue(metadata, 'connection-name');
   const requiresLeader = getFirstMetadataValue(metadata, 'requires-leader');
   const fields = {
@@ -171,7 +161,9 @@ function sanitizeForLog(value: unknown, seen = new WeakSet<object>()): unknown {
     return Object.fromEntries(
       Object.entries(value).map(([key, entry]) => [
         key,
-        sanitizeForLog(entry, seen),
+        /password|authorization|token|secret|credential|api[-_]?key/i.test(key)
+          ? '[redacted]'
+          : sanitizeForLog(entry, seen),
       ]),
     );
   }
@@ -187,40 +179,6 @@ function sanitizeForLog(value: unknown, seen = new WeakSet<object>()): unknown {
   return Object.prototype.toString.call(value);
 }
 
-function summarizeBinary(value: Buffer): {
-  type: 'binary';
-  length: number;
-  utf8Preview?: string;
-  hexPreview: string;
-} {
-  const utf8Preview = value
-    .subarray(0, 128)
-    .toString('utf8')
-    .replace(/\r/g, '\\r')
-    .replace(/\n/g, '\\n');
-
-  return {
-    type: 'binary',
-    length: value.length,
-    ...(utf8Preview.trim() ? { utf8Preview } : {}),
-    hexPreview: value.subarray(0, 32).toString('hex'),
-  };
-}
-
-function normalizeMetadataValue(value: unknown): unknown {
-  if (Buffer.isBuffer(value)) {
-    return value.toString('utf8');
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((entry) => normalizeMetadataValue(entry));
-  }
-
-  return value;
-}
-
-function toCamelCase(value: string): string {
-  return value.replace(/-([a-z])/g, (_, letter: string) =>
-    letter.toUpperCase(),
-  );
+function summarizeBinary(value: Buffer): { type: 'binary'; length: number } {
+  return { type: 'binary', length: value.length };
 }

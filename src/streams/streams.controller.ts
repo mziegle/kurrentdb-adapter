@@ -29,6 +29,7 @@ import { AdapterStatsService } from '../operations/adapter-stats.service';
 import {
   Metadata,
   ServerReadableStream,
+  ServerUnaryCall,
   ServerWritableStream,
   sendUnaryData,
   status,
@@ -42,6 +43,9 @@ import {
 } from '../shared/debug-log';
 import { appLogger } from '../shared/logger';
 import { BatchAppendSession } from './batch-append-session';
+import { createWriteContext } from './write-context';
+import { GroupDispatchError } from '../mongodb/group-dispatcher';
+import { PostgresProtocolService } from '../postgres/postgres-protocol.service';
 
 @Controller()
 export class StreamsController {
@@ -233,6 +237,7 @@ export class StreamsController {
       },
     });
     const operation = this.stats.startOperation('append');
+    const writeContext = createWriteContext(call, undefined, false);
     let completed = false;
     const messages: AppendReq[] = [];
 
@@ -245,7 +250,7 @@ export class StreamsController {
 
     call.on('end', () => {
       this.eventStore
-        .append(messages)
+        .append(messages, writeContext.context)
         .then((response) => {
           completed = true;
           operation.succeeded();
@@ -255,7 +260,8 @@ export class StreamsController {
           completed = true;
           operation.failed();
           callback(this.mapServiceError(error), null);
-        });
+        })
+        .finally(writeContext.dispose);
     });
 
     call.on('error', (error) => {
@@ -264,6 +270,7 @@ export class StreamsController {
         operation.failed();
       }
       callback(error, null);
+      writeContext.dispose();
     });
   }
 
@@ -271,6 +278,7 @@ export class StreamsController {
   delete(
     request: DeleteReq,
     metadata?: Metadata,
+    call?: ServerUnaryCall<DeleteReq, DeleteResp>,
   ): Promise<DeleteResp> | Observable<DeleteResp> | DeleteResp {
     logHotPath('gRPC Streams.Delete', {
       summary: summarizeGrpcMetadata(metadata),
@@ -280,14 +288,20 @@ export class StreamsController {
       },
     });
     const operation = this.stats.startOperation('delete');
+    const writeContext = call ? createWriteContext(call) : undefined;
     return (async () => {
       try {
-        const response = await this.eventStore.delete(request);
+        const response = await this.eventStore.delete(
+          request,
+          writeContext?.context,
+        );
         operation.succeeded();
         return response;
       } catch (error: unknown) {
         operation.failed();
         throw new RpcException(this.mapServiceError(error));
+      } finally {
+        writeContext?.dispose();
       }
     })();
   }
@@ -296,6 +310,7 @@ export class StreamsController {
   tombstone(
     request: TombstoneReq,
     metadata?: Metadata,
+    call?: ServerUnaryCall<TombstoneReq, TombstoneResp>,
   ): Promise<TombstoneResp> | Observable<TombstoneResp> | TombstoneResp {
     logHotPath('gRPC Streams.Tombstone', {
       summary: summarizeGrpcMetadata(metadata),
@@ -305,14 +320,20 @@ export class StreamsController {
       },
     });
     const operation = this.stats.startOperation('tombstone');
+    const writeContext = call ? createWriteContext(call) : undefined;
     return (async () => {
       try {
-        const response = await this.eventStore.tombstone(request);
+        const response = await this.eventStore.tombstone(
+          request,
+          writeContext?.context,
+        );
         operation.succeeded();
         return response;
       } catch (error: unknown) {
         operation.failed();
         throw new RpcException(this.mapServiceError(error));
+      } finally {
+        writeContext?.dispose();
       }
     })();
   }
@@ -327,8 +348,13 @@ export class StreamsController {
     });
     const session = new BatchAppendSession(
       call,
-      (requestGroup, enqueueResponse) =>
-        this.handleBatchAppendGroup(call, requestGroup, enqueueResponse),
+      (requestGroup, enqueueResponse, startedAt) =>
+        this.handleBatchAppendGroup(
+          call,
+          requestGroup,
+          enqueueResponse,
+          startedAt,
+        ),
       (correlationId) => this.getBatchAppendCorrelationKey(correlationId),
       (error) => this.mapServiceError(error),
     );
@@ -354,10 +380,37 @@ export class StreamsController {
     call: ServerDuplexStream<BatchAppendReq, BatchAppendResp>,
     requestGroup: BatchAppendReq[],
     enqueueResponse: (response: BatchAppendResp) => Promise<void>,
+    startedAt: number,
   ): Promise<void> {
     const operation = this.stats.startOperation('batchAppend');
+    const options = requestGroup.find((request) => request.options)?.options;
+    // protobufjs preserves underscores before digits in this legacy field.
+    const absoluteDeadline =
+      options?.deadline21100 ??
+      (
+        options as typeof options & {
+          deadline_21_10_0?: NonNullable<typeof options>['deadline21100'];
+        }
+      )?.deadline_21_10_0;
+    const time = absoluteDeadline ?? options?.deadline;
+    const groupDeadline = time
+      ? (absoluteDeadline ? 0 : startedAt) +
+        Number(time.seconds) * 1000 +
+        // Floor before adding the epoch: floating-point rounding at epoch scale
+        // could otherwise extend a sub-millisecond deadline.
+        Math.floor(Number(time.nanos ?? 0) / 1_000_000)
+      : undefined;
+    const writeContext = createWriteContext(call, groupDeadline);
     try {
-      const response = await this.eventStore.batchAppend(requestGroup);
+      let response: BatchAppendResp;
+      try {
+        response = await this.eventStore.batchAppend(
+          requestGroup,
+          writeContext.context,
+        );
+      } finally {
+        writeContext.dispose();
+      }
       if (call.destroyed) {
         operation.succeeded();
         return;
@@ -367,6 +420,57 @@ export class StreamsController {
       operation.succeeded();
     } catch (error: unknown) {
       operation.failed();
+      const correlationId = requestGroup[0]?.correlationId;
+      const streamIdentifier = options?.streamIdentifier;
+      if (
+        error instanceof GroupDispatchError &&
+        correlationId &&
+        streamIdentifier?.streamName
+      ) {
+        // The client recognizes Timeout and Unknown, but has no correlated
+        // capacity/cancellation error. Never label a sealed outcome as timeout:
+        // it can still commit after its caller's deadline.
+        await enqueueResponse({
+          correlationId,
+          streamIdentifier,
+          streamPosition: options?.streamPosition,
+          noStream: options?.noStream,
+          any: options?.any,
+          streamExists: options?.streamExists,
+          error:
+            error.code === 'cancelled' &&
+            writeContext.context.deadline !== undefined &&
+            Date.now() >= writeContext.context.deadline
+              ? new PostgresProtocolService().createBatchAppendTimeoutStatus()
+              : new PostgresProtocolService().createBatchAppendUnknownStatus(
+                  error.code === 'capacity' || error.code === 'closed'
+                    ? 'Append was not dispatched.'
+                    : undefined,
+                ),
+        });
+        return;
+      }
+      if (
+        error instanceof StreamDeletedServiceError &&
+        correlationId &&
+        streamIdentifier?.streamName &&
+        Buffer.from(streamIdentifier.streamName).toString('utf8') ===
+          error.streamName
+      ) {
+        await enqueueResponse({
+          correlationId,
+          streamIdentifier,
+          streamPosition: options?.streamPosition,
+          noStream: options?.noStream,
+          any: options?.any,
+          streamExists: options?.streamExists,
+          error:
+            new PostgresProtocolService().createBatchAppendStreamDeletedStatus(
+              streamIdentifier.streamName,
+            ),
+        });
+        return;
+      }
       if (!call.destroyed) {
         call.destroy(this.mapServiceError(error));
       }

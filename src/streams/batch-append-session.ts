@@ -3,6 +3,7 @@ import { BatchAppendReq, BatchAppendResp } from '../interfaces/streams';
 
 export class BatchAppendSession {
   private readonly pendingMessages = new Map<string, BatchAppendReq[]>();
+  private readonly groupStartedAt = new Map<string, number>();
   private activeWrites = 0;
   private streamEnded = false;
   private streamClosed = false;
@@ -13,6 +14,7 @@ export class BatchAppendSession {
     private readonly handleGroup: (
       requestGroup: BatchAppendReq[],
       enqueueResponse: (response: BatchAppendResp) => Promise<void>,
+      startedAt: number,
     ) => Promise<void>,
     private readonly getCorrelationKey: (
       correlationId: BatchAppendReq['correlationId'],
@@ -26,6 +28,9 @@ export class BatchAppendSession {
     }
 
     const correlationKey = this.getCorrelationKey(message.correlationId);
+    if (!this.pendingMessages.has(correlationKey)) {
+      this.groupStartedAt.set(correlationKey, Date.now());
+    }
     const requestGroup = this.pendingMessages.get(correlationKey) ?? [];
     requestGroup.push(message);
     this.pendingMessages.set(correlationKey, requestGroup);
@@ -35,10 +40,14 @@ export class BatchAppendSession {
     }
 
     this.pendingMessages.delete(correlationKey);
+    const startedAt = this.groupStartedAt.get(correlationKey)!;
+    this.groupStartedAt.delete(correlationKey);
     this.activeWrites += 1;
 
-    void this.handleGroup(requestGroup, (response) =>
-      this.enqueueResponse(response),
+    void this.handleGroup(
+      requestGroup,
+      (response) => this.enqueueResponse(response),
+      startedAt,
     ).finally(() => {
       this.activeWrites -= 1;
       this.finishIfComplete();
@@ -53,6 +62,7 @@ export class BatchAppendSession {
   onClose(): void {
     this.streamClosed = true;
     this.pendingMessages.clear();
+    this.groupStartedAt.clear();
   }
 
   onError(error: Error): void {
@@ -91,6 +101,7 @@ export class BatchAppendSession {
 
     this.streamClosed = true;
     this.pendingMessages.clear();
+    this.groupStartedAt.clear();
     this.call.end();
   }
 

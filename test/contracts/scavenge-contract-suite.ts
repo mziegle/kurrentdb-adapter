@@ -179,30 +179,29 @@ export function registerScavengeContractSuite(
     it('keeps the last truncated event in storage even after scavenging', async () => {
       const streamName = `${backendName.toLowerCase()}-truncate-last-${Date.now()}`;
 
-      await backend.getClient().appendToStream(
-        streamName,
-        jsonEvent({
-          type: 'booking-created',
-          data: { step: 1 },
-        }),
-      );
+      await backend
+        .getClient()
+        .appendToStream(streamName, [
+          jsonEvent({ type: 'booking-created', data: { step: 1 } }),
+          jsonEvent({ type: 'booking-confirmed', data: { step: 2 } }),
+        ]);
 
       await backend.getClient().setStreamMetadata(streamName, {
-        truncateBefore: 1,
+        truncateBefore: 2,
       });
 
       await expect(readStreamEvents(backend, streamName)).resolves.toEqual([]);
       await expect(
         readAllEventsForStream(backend, streamName),
-      ).resolves.toHaveLength(1);
+      ).resolves.toHaveLength(2);
 
       const scavengeResult = await backend.startScavenge();
       expect(scavengeResult.scavengeId).not.toHaveLength(0);
 
       await waitFor(async () => {
-        expect(await readAllEventsForStream(backend, streamName)).toHaveLength(
-          1,
-        );
+        expect(await readAllEventsForStream(backend, streamName)).toEqual([
+          { type: 'booking-confirmed', data: { step: 2 } },
+        ]);
       });
       await expect(readStreamEvents(backend, streamName)).resolves.toEqual([]);
     });

@@ -112,7 +112,7 @@ function parseTcpEndpoint(urlOrHostPort: string): {
   };
 }
 
-async function startProbeProxy(
+export async function startProbeProxy(
   publicGrpcUrl: string,
   internalGrpcUrl: string,
   stats: AdapterStatsService,
@@ -120,155 +120,74 @@ async function startProbeProxy(
   const publicEndpoint = parseTcpEndpoint(publicGrpcUrl);
   const internalEndpoint = parseTcpEndpoint(internalGrpcUrl);
 
-  const server = createServer((clientSocket) => {
-    const upstreamSocket = new Socket();
-    const pendingUpstreamWrites: Buffer[] = [];
+  const server = createServer({ allowHalfOpen: true }, (clientSocket) => {
+    const upstreamSocket = new Socket({ allowHalfOpen: true });
+    let routed = false;
     let loggedFirstChunk = false;
-    let upstreamConnected = false;
-    let upstreamConnecting = false;
-    let interceptedHealthCheck = false;
-    let proxyClosed = false;
 
-    const connectUpstream = () => {
-      if (
-        upstreamConnected ||
-        upstreamConnecting ||
-        interceptedHealthCheck ||
-        proxyClosed
-      ) {
-        return;
-      }
-
-      upstreamConnecting = true;
-      upstreamSocket.connect(internalEndpoint.port, internalEndpoint.host);
+    const destroyBoth = () => {
+      clientSocket.destroy();
+      upstreamSocket.destroy();
     };
 
-    const flushPendingUpstreamWrites = () => {
-      if (!upstreamConnected || proxyClosed || upstreamSocket.destroyed) {
-        return;
-      }
-
-      while (pendingUpstreamWrites.length > 0) {
-        const chunk = pendingUpstreamWrites.shift();
-        if (!chunk) {
-          continue;
-        }
-
-        if (!safeWrite(upstreamSocket, chunk)) {
-          pendingUpstreamWrites.unshift(chunk);
-          return;
-        }
-      }
-    };
-
-    const closeProxy = (error?: Error) => {
-      if (proxyClosed) {
-        return;
-      }
-
-      proxyClosed = true;
-
-      if (!clientSocket.destroyed) {
-        if (error) {
-          clientSocket.destroy(error);
-        } else {
-          clientSocket.end();
-        }
-      }
-
-      if (!upstreamSocket.destroyed) {
-        if (error) {
-          upstreamSocket.destroy(error);
-        } else {
-          upstreamSocket.end();
-        }
-      }
-    };
-
-    clientSocket.on('data', (chunk) => {
+    clientSocket.on('data', (chunk: Buffer) => {
+      if (routed) return;
       if (!loggedFirstChunk) {
         loggedFirstChunk = true;
         logIncomingProbe(clientSocket, chunk);
       }
 
-      if (tryHandleHealthProbe(clientSocket, chunk)) {
-        interceptedHealthCheck = true;
+      if (
+        tryHandleHealthProbe(clientSocket, chunk) ||
+        tryHandleInfoRequest(clientSocket, chunk) ||
+        tryHandleInfoOptionsRequest(clientSocket, chunk) ||
+        tryHandleGossipRequest(clientSocket, chunk) ||
+        tryHandleStatsRequest(clientSocket, chunk, stats) ||
+        tryHandlePingRequest(clientSocket, chunk)
+      ) {
         return;
       }
 
-      if (tryHandleInfoRequest(clientSocket, chunk)) {
-        interceptedHealthCheck = true;
-        return;
-      }
-
-      if (tryHandleInfoOptionsRequest(clientSocket, chunk)) {
-        interceptedHealthCheck = true;
-        return;
-      }
-
-      if (tryHandleGossipRequest(clientSocket, chunk)) {
-        interceptedHealthCheck = true;
-        return;
-      }
-
-      if (tryHandleStatsRequest(clientSocket, chunk, stats)) {
-        interceptedHealthCheck = true;
-        return;
-      }
-
-      if (tryHandlePingRequest(clientSocket, chunk)) {
-        interceptedHealthCheck = true;
-        return;
-      }
-
-      connectUpstream();
-      if (!upstreamConnected) {
-        pendingUpstreamWrites.push(Buffer.from(chunk));
-        return;
-      }
-
-      if (!safeWrite(upstreamSocket, chunk)) {
-        pendingUpstreamWrites.push(Buffer.from(chunk));
-      }
-    });
-
-    upstreamSocket.on('connect', () => {
-      upstreamConnecting = false;
-      upstreamConnected = true;
-      flushPendingUpstreamWrites();
-    });
-
-    upstreamSocket.on('data', (chunk) => {
-      if (!safeWrite(clientSocket, chunk)) {
-        closeProxy();
-      }
+      routed = true;
+      // Keep the first chunk in order and stop reading until it is accepted.
+      clientSocket.pause();
+      upstreamSocket.connect(
+        internalEndpoint.port,
+        internalEndpoint.host,
+        () => {
+          if (clientSocket.destroyed || upstreamSocket.destroyed) {
+            destroyBoth();
+            return;
+          }
+          upstreamSocket.pipe(clientSocket);
+          const ready = upstreamSocket.write(chunk);
+          const forward = () => {
+            if (!clientSocket.destroyed && !upstreamSocket.destroyed) {
+              clientSocket.pipe(upstreamSocket);
+            }
+          };
+          if (ready) forward();
+          else upstreamSocket.once('drain', forward);
+        },
+      );
     });
 
     clientSocket.on('end', () => {
-      closeProxy();
+      if (!routed) clientSocket.end();
     });
-
-    upstreamSocket.on('end', () => {
-      closeProxy();
-    });
-
     clientSocket.on('close', () => {
-      proxyClosed = true;
+      if (!clientSocket.readableEnded) upstreamSocket.destroy();
     });
-
     upstreamSocket.on('close', () => {
-      proxyClosed = true;
+      if (!upstreamSocket.readableEnded) clientSocket.destroy();
     });
-
     clientSocket.on('error', (error) => {
       logProbeSocketError('Probe proxy client error', error);
-      closeProxy(error);
+      destroyBoth();
     });
-
     upstreamSocket.on('error', (error) => {
-      upstreamConnecting = false;
       logProbeSocketError('Probe proxy upstream error', error);
-      closeProxy(error);
+      destroyBoth();
     });
   });
 
@@ -281,15 +200,6 @@ async function startProbeProxy(
   });
 
   return server;
-}
-
-function safeWrite(socket: Socket, chunk: Buffer | string): boolean {
-  if (socket.destroyed || socket.writableEnded) {
-    return false;
-  }
-
-  socket.write(chunk);
-  return true;
 }
 
 function logProbeSocketError(message: string, error: Error): void {
@@ -309,7 +219,7 @@ function isBenignSocketCloseError(error: Error & { code?: string }): boolean {
   );
 }
 
-function logIncomingProbe(clientSocket: Socket, chunk: Buffer): void {
+export function logIncomingProbe(clientSocket: Socket, chunk: Buffer): void {
   const remoteAddress = `${clientSocket.remoteAddress ?? 'unknown'}:${clientSocket.remotePort ?? 0}`;
   const requestLine = chunk.toString('utf8').split('\r\n', 1)[0] ?? '';
   const knownHttpPath = getKnownHttpPath(requestLine);
@@ -319,18 +229,19 @@ function logIncomingProbe(clientSocket: Socket, chunk: Buffer): void {
       summary: `from ${remoteAddress}`,
       trace: {
         remoteAddress,
-        requestLine,
+        bytes: chunk.length,
       },
     });
     return;
   }
 
   if (isHttp1RequestLine(requestLine)) {
+    const method = requestLine.split(' ', 1)[0];
     appLogger.info(
       {
         event: 'incoming_request',
         requestLabel: 'HTTP unhandled',
-        summary: `${requestLine} from ${remoteAddress}`,
+        summary: `${method} [target omitted] from ${remoteAddress}`,
       },
       'HTTP unhandled request',
     );
@@ -340,11 +251,8 @@ function logIncomingProbe(clientSocket: Socket, chunk: Buffer): void {
         requestLabel: 'HTTP unhandled',
         trace: {
           remoteAddress,
-          requestLine,
-          rawChunk: {
-            utf8Preview: chunk.subarray(0, 256).toString('utf8'),
-            hexPreview: chunk.subarray(0, 64).toString('hex'),
-          },
+          method,
+          bytes: chunk.length,
         },
       },
       'HTTP unhandled request full details',
@@ -352,12 +260,6 @@ function logIncomingProbe(clientSocket: Socket, chunk: Buffer): void {
     return;
   }
 
-  const asciiPreview = chunk
-    .subarray(0, 96)
-    .toString('utf8')
-    .replace(/\r/g, '\\r')
-    .replace(/\n/g, '\\n');
-  const hexPreview = chunk.subarray(0, 24).toString('hex');
   const protocolGuess = guessProtocol(chunk);
 
   appLogger.info(
@@ -373,8 +275,7 @@ function logIncomingProbe(clientSocket: Socket, chunk: Buffer): void {
       event: 'probe_request',
       remoteAddress,
       protocolGuess,
-      asciiPreview,
-      hexPreview,
+      bytes: chunk.length,
     },
     'Probe proxy request details',
   );

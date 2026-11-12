@@ -31,7 +31,7 @@ export async function runSubscribeTest(backend: BackendClient): Promise<{ stream
   const received: string[] = [];
 
   const readPromise = (async (): Promise<void> => {
-    for await (const event of backend.subscribeToStream(stream, 0n)) {
+    for await (const event of backend.subscribeToStream(stream)) {
       received.push(event.eventType);
       if (received.length >= 3) {
         break;
