@@ -18,159 +18,21 @@ import { EVENT_STORE_BACKEND } from '../src/event-store/event-store-backend';
 import { MongoEventStoreService } from '../src/mongodb/mongodb-event-store.service';
 import { getFreePort } from './util/get-free-port';
 import { SerialAdmission } from './serial-admission';
-import { CooperativeDispatcher } from '../src/mongodb/cooperative-dispatcher';
-import { TransactionAdmission } from '../src/mongodb/transaction-admission';
-import { runMongoGroup } from '../src/mongodb/group-runner';
-import { AppendReq, AppendResp } from '../src/interfaces/streams';
-import { StreamDeletedServiceError } from '../src/event-store/event-store.errors';
-
-type GroupRequest = {
-  stream: string;
-  options: NonNullable<AppendReq['options']>;
-  events: NonNullable<AppendReq['proposedMessage']>[];
-};
-type GroupResult =
-  | { kind: 'result'; value: AppendResp }
-  | { kind: 'error'; error: StreamDeletedServiceError };
-
-/** Test-only wiring; not a production admission or shutdown implementation. */
-function installSharedAdmission(backend: MongoEventStoreService) {
-  const admission = new TransactionAdmission(256, 16 * 1024 * 1024);
-  const mongo = backend['infrastructure'].getClient();
-  const db = mongo.db(backend['infrastructure'].getDatabaseName());
-  const dispatcher = new CooperativeDispatcher<GroupRequest, GroupResult>(
-    { maxRequests: 32, maxEvents: 32, maxBytes: 1024 * 1024 },
-    1,
-    (request) => request.stream,
-    async (finalize) => {
-      const release = await admission.acquire(1);
-      let cleaned = false;
-      try {
-        const batch = finalize();
-        if (!batch) {
-          cleaned = true;
-          return;
-        }
-        const borrowed = new Proxy(batch, {
-          get(target, property) {
-            if (property === 'retain') return () => () => undefined;
-            const value: unknown = Reflect.get(target, property, target);
-            return (
-              typeof value === 'function' ? value.bind(target) : value
-            ) as unknown;
-          },
-        });
-        const tracked = new Proxy(mongo, {
-          get(target, property) {
-            if (property === 'startSession')
-              return () => {
-                const session = target.startSession();
-                const end = session.endSession.bind(
-                  session,
-                ) as () => Promise<void>;
-                session.endSession = async () => {
-                  await end();
-                  cleaned = true;
-                };
-                return session;
-              };
-            const value: unknown = Reflect.get(target, property, target);
-            return (
-              typeof value === 'function' ? value.bind(target) : value
-            ) as unknown;
-          },
-        });
-        try {
-          await runMongoGroup(
-            tracked,
-            borrowed,
-            (request, session) =>
-              backend['appendGroupMember'](
-                session,
-                db,
-                request.options,
-                request.stream,
-                request.events,
-              ),
-            { maxAttempts: 1, maxCommitAttempts: 1 },
-          );
-        } catch (error) {
-          if (!cleaned) throw error;
-        }
-        if (!cleaned) throw new Error('session cleanup unconfirmed');
-      } finally {
-        if (cleaned) release();
-      }
-    },
-  );
-  Object.assign(backend, { groupDispatcher: dispatcher });
-  const append = backend.append.bind(
-    backend,
-  ) as MongoEventStoreService['append'];
-  backend.append = async (messages, context) => {
-    const options = messages.find((message) => message.options)?.options;
-    const stream = options?.streamIdentifier?.streamName;
-    const eligible =
-      stream &&
-      !Buffer.from(stream).toString().startsWith('$') &&
-      options?.any !== undefined &&
-      options.revision === undefined &&
-      options.noStream === undefined &&
-      options.streamExists === undefined &&
-      messages.filter((message) => message.proposedMessage).length === 1;
-    if (eligible) return append(messages, context);
-    const release = await admission.acquire(1, context);
-    try {
-      return await append(messages, context);
-    } finally {
-      release();
-    }
-  };
-  const deleteStream = backend.delete.bind(
-    backend,
-  ) as MongoEventStoreService['delete'];
-  backend.delete = async (request) => {
-    const release = await admission.acquire(1);
-    try {
-      return await deleteStream(request);
-    } finally {
-      release();
-    }
-  };
-  const tombstone = backend.tombstone.bind(
-    backend,
-  ) as MongoEventStoreService['tombstone'];
-  backend.tombstone = async (request) => {
-    const release = await admission.acquire(1);
-    try {
-      return await tombstone(request);
-    } finally {
-      release();
-    }
-  };
-  return async () => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        admission.shutdown(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error('admission did not drain')),
-            2000,
-          );
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  };
-}
+import { Batch } from '../src/mongodb/group-commit';
+import { requestSize } from '../src/mongodb/request-size';
 
 describe('Mongo group commit through AppModule', () => {
   jest.setTimeout(120000);
   let container: StartedTestContainer;
   let uri: string;
   const previous = { ...process.env };
+  let savedExitCode: typeof process.exitCode;
+  beforeEach(() => {
+    savedExitCode = process.exitCode;
+  });
+  afterEach(() => {
+    process.exitCode = savedExitCode;
+  });
   beforeAll(async () => {
     container = await new GenericContainer('mongo:7')
       .withCommand(['mongod', '--replSet', 'rs0', '--bind_ip_all'])
@@ -200,6 +62,7 @@ describe('Mongo group commit through AppModule', () => {
     client: KurrentDBClient;
     mongo: MongoClient;
     shutdownShared: () => Promise<void>;
+    port: number;
   }> {
     process.env.EVENT_STORE_BACKEND = 'mongodb';
     process.env.MONGODB_URI = uri;
@@ -217,9 +80,23 @@ describe('Mongo group commit through AppModule', () => {
       imports: [AppModule],
     }).compile();
     const backend = fixture.get<MongoEventStoreService>(EVENT_STORE_BACKEND);
-    const shutdownShared = shared
-      ? installSharedAdmission(backend)
-      : () => Promise.resolve();
+    const shutdownShared = async () => {
+      if (!shared) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          backend['admission']!.shutdown(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('admission did not drain')),
+              2000,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
     const mongo = backend['infrastructure'].getClient();
     Object.assign(mongo.options, { monitorCommands: true });
     const port = await getFreePort();
@@ -240,8 +117,318 @@ describe('Mongo group commit through AppModule', () => {
     });
     await app.listen();
     const client = KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${port}?tls=false`;
-    return { app, client, mongo, shutdownShared };
+    return { app, client, mongo, shutdownShared, port };
   }
+
+  it('keeps Mongo open for an ordinary write past its deadline and bounded shutdown', async () => {
+    const { app, client, mongo } = await start(false, 'ordinary_shutdown_live');
+    const backend = app.get<MongoEventStoreService>(EVENT_STORE_BACKEND);
+    const original = mongo.startSession.bind(
+      mongo,
+    ) as MongoClient['startSession'];
+    let releaseCleanup!: () => void;
+    const gate = new Promise<void>((resolve) => (releaseCleanup = resolve));
+    let enteredCleanup!: () => void;
+    const atCleanup = new Promise<void>(
+      (resolve) => (enteredCleanup = resolve),
+    );
+    let finishedCleanup!: () => void;
+    const cleanupDone = new Promise<void>(
+      (resolve) => (finishedCleanup = resolve),
+    );
+    const startSession = jest
+      .spyOn(mongo, 'startSession')
+      .mockImplementation((options) => {
+        const session = original(options);
+        startSession.mockRestore();
+        const end = session.endSession.bind(session) as () => Promise<void>;
+        jest.spyOn(session, 'endSession').mockImplementation(async () => {
+          enteredCleanup();
+          await gate;
+          await end();
+          finishedCleanup();
+        });
+        return session;
+      });
+    const close = jest.spyOn(mongo, 'close');
+    const bounded = async <T>(
+      promise: Promise<T>,
+      label: string,
+    ): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error(`${label} timed out`)),
+              5000,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+    let appClosed = false;
+    let reader: Awaited<ReturnType<typeof start>> | undefined;
+    let live: Promise<void>[] = [];
+    try {
+      const event = jsonEvent({ type: 'late-cleanup', data: { value: 1 } });
+      const result = client
+        .appendToStream('ordinary-shutdown', event, {
+          streamState: NO_STREAM,
+          deadline: 1000,
+        })
+        .then(
+          () => 'success',
+          () => 'error',
+        );
+      await bounded(atCleanup, 'entering cleanup');
+      live = [...backend['liveOrdinary']];
+      expect(live).toHaveLength(1);
+      expect(await bounded(result, 'write deadline')).toBe('error');
+      await bounded(app.close(), 'app shutdown');
+      expect(process.exitCode).toBe(1);
+      appClosed = true;
+      expect(close).not.toHaveBeenCalled();
+      await bounded(mongo.db('admin').command({ ping: 1 }), 'Mongo ping');
+      releaseCleanup();
+      await bounded(cleanupDone, 'driver session cleanup');
+      await bounded(Promise.all(live), 'ordinary work drain');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(backend['closingClient']).toBeDefined();
+      await bounded(backend['closingClient']!, 'late Mongo close');
+      expect(close).toHaveBeenCalledTimes(1);
+      reader = await start(false, 'ordinary_shutdown_live');
+      const ids: string[] = [];
+      for await (const { event: read } of reader.client.readStream(
+        'ordinary-shutdown',
+      ))
+        if (read) ids.push(read.id);
+      expect(ids).toEqual([event.id]);
+    } finally {
+      releaseCleanup();
+      startSession.mockRestore();
+      if (live.length) await bounded(Promise.all(live), 'fixture work drain');
+      await client.dispose();
+      if (!appClosed) await bounded(app.close(), 'fixture app shutdown');
+      await reader?.client.dispose();
+      await reader?.app.close();
+      if (backend['closingClient']) await backend['closingClient'];
+      else await mongo.close();
+      close.mockRestore();
+    }
+  });
+
+  it('keeps ordinary tombstone cleanup unconfirmed after a committed session cleanup failure', async () => {
+    const { app, client, mongo } = await start(
+      false,
+      'ordinary_cleanup_failure',
+    );
+    const backend = app.get<MongoEventStoreService>(EVENT_STORE_BACKEND);
+    const original: MongoClient['startSession'] = mongo.startSession.bind(
+      mongo,
+    ) as MongoClient['startSession'];
+    const cleanupError = new Error('injected cleanup failure');
+    let driverCleaned = false;
+    const startSession = jest
+      .spyOn(mongo, 'startSession')
+      .mockImplementation((options) => {
+        const session = original(options);
+        const end: () => Promise<void> = session.endSession.bind(
+          session,
+        ) as () => Promise<void>;
+        jest.spyOn(session, 'endSession').mockImplementation(async () => {
+          await end();
+          driverCleaned = true;
+          throw cleanupError;
+        });
+        return session;
+      });
+    const cleanup: { cleanup: 'complete' | 'unconfirmed' } = {
+      cleanup: 'unconfirmed',
+    };
+    try {
+      await expect(
+        backend.tombstone(
+          {
+            options: {
+              streamIdentifier: { streamName: Buffer.from('cleanup-failed') },
+              any: {},
+            },
+          },
+          undefined,
+          cleanup,
+        ),
+      ).rejects.toMatchObject({ code: 'unknown', cause: cleanupError });
+      expect(cleanup.cleanup).toBe('unconfirmed');
+      startSession.mockRestore();
+      await expect(
+        client.appendToStream(
+          'cleanup-failed',
+          jsonEvent({ type: 'test', data: {} }),
+        ),
+      ).rejects.toBeInstanceOf(StreamDeletedError);
+    } finally {
+      startSession.mockRestore();
+      await client.dispose();
+      await app.close();
+      if (driverCleaned) await mongo.close();
+    }
+  });
+
+  it.each(
+    (['append', 'delete', 'tombstone'] as const).flatMap((kind) =>
+      (['fails', 'hangs'] as const).map((fault) => ({ kind, fault })),
+    ),
+  )(
+    'retains shared admission after committed ordinary $kind cleanup $fault',
+    async ({ kind, fault }) => {
+      const { app, client, mongo, shutdownShared } = await start(
+        true,
+        `cleanup_${fault}_${kind}`,
+        true,
+      );
+      const backend = app.get<MongoEventStoreService>(EVENT_STORE_BACKEND);
+      let releaseCleanup!: () => void;
+      const cleanupGate = new Promise<void>(
+        (resolve) => (releaseCleanup = resolve),
+      );
+      const target = `target-${kind}`;
+      if (kind !== 'append')
+        await client.appendToStream(
+          target,
+          jsonEvent({ type: 'seed', data: {} }),
+          {
+            streamState: NO_STREAM,
+          },
+        );
+      const original = mongo.startSession.bind(
+        mongo,
+      ) as MongoClient['startSession'];
+      let entered!: () => void;
+      const atCleanup = new Promise<void>((resolve) => (entered = resolve));
+      const spy = jest
+        .spyOn(mongo, 'startSession')
+        .mockImplementation((options) => {
+          const session = original(options);
+          spy.mockRestore();
+          const end = session.endSession.bind(session) as () => Promise<void>;
+          jest.spyOn(session, 'endSession').mockImplementation(async () => {
+            await end();
+            entered();
+            if (fault === 'hangs') await cleanupGate;
+            else throw new Error('injected cleanup failure');
+          });
+          return session;
+        });
+      // Only the fixture can observe that the real driver cleanup succeeded
+      // before the injected error. Production must retain the uncertain permit.
+      let safeToCloseFixtureClient = false;
+      let commands = 0;
+      const listener = (event: { commandName: string }) => {
+        if (event.commandName === 'commitTransaction') commands++;
+      };
+      mongo.on('commandStarted', listener);
+      const writeSpy =
+        kind === 'append'
+          ? jest.spyOn(backend, 'append')
+          : kind === 'delete'
+            ? jest.spyOn(backend, 'delete')
+            : jest.spyOn(backend, 'tombstone');
+      try {
+        const write =
+          kind === 'append'
+            ? client.appendToStream(
+                target,
+                jsonEvent({ type: 'committed', data: {} }),
+                { streamState: NO_STREAM, deadline: 1000 },
+              )
+            : kind === 'delete'
+              ? client.deleteStream(target, { deadline: 1000 })
+              : client.tombstoneStream(target, { deadline: 1000 });
+        const result = write.then(
+          () => ({ kind: 'success' as const }),
+          (error: unknown) => ({ kind: 'error' as const, error }),
+        );
+        await atCleanup;
+        const backendWrite = writeSpy.mock.results[0].value as Promise<unknown>;
+        const outcome = await Promise.race([
+          result,
+          new Promise<{ kind: 'pending' }>((resolve) =>
+            setTimeout(() => resolve({ kind: 'pending' }), 1500),
+          ),
+        ]);
+        expect(outcome.kind).not.toBe('success');
+        if (outcome.kind === 'error') {
+          expect(outcome.error).toBeInstanceOf(Error);
+          expect(outcome.error).not.toBeInstanceOf(WrongExpectedVersionError);
+          expect(outcome.error).not.toBeInstanceOf(StreamDeletedError);
+        }
+        const before = commands;
+        const deleteSpy = jest.spyOn(backend, 'delete');
+        const sessions = jest.spyOn(mongo, 'startSession');
+        const queuedResult = client.deleteStream('blocked').then(
+          () => 'success',
+          () => 'error',
+        );
+        for (let i = 0; i < 100 && !deleteSpy.mock.calls.length; i++)
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(deleteSpy).toHaveBeenCalledTimes(1);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(sessions).not.toHaveBeenCalled();
+        expect(commands).toBe(before);
+        sessions.mockRestore();
+        deleteSpy.mockRestore();
+        if (kind === 'append') {
+          const types: string[] = [];
+          for await (const { event } of client.readStream(target))
+            if (event) types.push(event.type);
+          expect(types).toEqual(['committed']);
+        } else if (kind === 'delete') {
+          const events: string[] = [];
+          for await (const { event } of client.readAll())
+            if (event?.streamId === target) events.push(event.type);
+          expect(events).toContain('seed');
+          await expect(async () => {
+            for await (const _ of client.readStream(target)) void _;
+          }).rejects.toThrow();
+        } else {
+          await expect(async () => {
+            for await (const _ of client.readStream(target)) void _;
+          }).rejects.toBeInstanceOf(StreamDeletedError);
+        }
+        await expect(shutdownShared()).rejects.toThrow(
+          'admission did not drain',
+        );
+        expect(await queuedResult).toBe('error');
+        if (fault === 'fails') {
+          const failure: unknown = await backendWrite.catch(
+            (error: unknown) => error,
+          );
+          expect(failure).toMatchObject({ code: 'unknown' });
+          expect((failure as Error).cause).toBeInstanceOf(Error);
+          expect(((failure as Error).cause as Error).message).toBe(
+            'injected cleanup failure',
+          );
+          safeToCloseFixtureClient = true;
+        }
+        if (fault === 'hangs') {
+          releaseCleanup();
+          await shutdownShared();
+        }
+      } finally {
+        releaseCleanup();
+        spy.mockRestore();
+        writeSpy.mockRestore();
+        mongo.off('commandStarted', listener);
+        await client.dispose();
+        await app.close();
+        if (safeToCloseFixtureClient) await mongo.close();
+      }
+    },
+  );
 
   it.each([true, false])(
     'coalescing is enabled only with flag=%s',
@@ -557,6 +744,7 @@ describe('Mongo group commit through AppModule', () => {
         `single_mixed_${mode}`,
         mode === 'shared',
       );
+      const borrow = jest.spyOn(Batch.prototype, 'borrow');
       const admission = new SerialAdmission(8);
       const counts: Record<string, Record<string, number>> = {};
       const attempted = new Map<string, { stream: string; outcome: string }>();
@@ -653,7 +841,8 @@ describe('Mongo group commit through AppModule', () => {
         console.log(
           `single mixed ${mode}: ${JSON.stringify(counts)}; attempted IDs persisted=${seen.size}/${attempted.size}; unknown append IDs observed=${unknownPersisted}/${unknown.length}`,
         );
-        if (mode === 'shared') {
+        if (mode === 'shared') expect(borrow).toHaveBeenCalled();
+        if (mode === 'shared' || mode === 'parallel') {
           expect(counts).toEqual({
             grouped: { success: 20, unknown: 0, other: 0 },
             ordinary: { success: 10, unknown: 0, other: 0 },
@@ -663,6 +852,7 @@ describe('Mongo group commit through AppModule', () => {
           expect(seen.size).toBe(30);
         }
       } finally {
+        borrow.mockRestore();
         try {
           await client.dispose();
         } finally {
@@ -822,6 +1012,153 @@ describe('Mongo group commit through AppModule', () => {
       expect(results[0].reason).toBeInstanceOf(UnknownError);
       expect(results[1].status).toBe('fulfilled');
     } finally {
+      await client.dispose();
+      await app.close();
+    }
+  });
+
+  // Two real decoded requests exercise per-request charges, not allocator sharing
+  // across sessions or saturation of the aggregate queue budget.
+  it('charges decoded payload backing for grouped writes from separate client sessions', async () => {
+    const { app, client, port } = await start(true, 'group_decoded_budget');
+    const backend = app.get<MongoEventStoreService>(EVENT_STORE_BACKEND);
+    const second = KurrentDBClient.connectionString`kurrentdb://127.0.0.1:${port}?tls=false`;
+    const append = jest.spyOn(backend, 'append');
+    const enqueue = jest.spyOn(backend['groupDispatcher']!, 'enqueue');
+    try {
+      const events = [0, 1].map((i) =>
+        jsonEvent({ type: 'budget', data: { i, payload: 'x'.repeat(16000) } }),
+      );
+      const results = await Promise.all(
+        events.map((event, i) =>
+          (i === 0 ? client : second).appendToStream(`budget-${i}`, event, {
+            streamState: ANY,
+            deadline: 5000,
+          }),
+        ),
+      );
+      expect(results.every((result) => result.success)).toBe(true);
+      expect(append).toHaveBeenCalledTimes(2);
+      expect(enqueue).toHaveBeenCalledTimes(2);
+      for (const [index, [messages]] of append.mock.calls.entries()) {
+        const data = messages.find((message) => message.proposedMessage)
+          ?.proposedMessage?.data;
+        expect(data).toBeInstanceOf(Uint8Array);
+        expect(data!.byteLength).toBeGreaterThan(16000);
+        expect(data!.buffer.byteLength).toBeGreaterThan(data!.byteLength);
+        expect(enqueue.mock.calls[index][2]).toBeGreaterThanOrEqual(
+          data!.buffer.byteLength,
+        );
+        expect(enqueue.mock.calls[index][2]).toBe(
+          requestSize(messages, 1024 * 1024, true),
+        );
+        expect(enqueue.mock.calls[index][2]).toBeGreaterThanOrEqual(
+          requestSize(messages, 1024 * 1024),
+        );
+      }
+    } finally {
+      enqueue.mockRestore();
+      append.mockRestore();
+      await second.dispose();
+      await client.dispose();
+      await app.close();
+    }
+  });
+
+  // Group-disabled mode has no shared Mongo admission permit: observe the batch
+  // session's retained completion, not process-wide transaction serialization.
+  it('retains ordinary batch ownership through cleanup after a deadline and eventual commit', async () => {
+    const { app, client, mongo } = await start(false, 'ordinary_late_cleanup');
+    const backend = app.get<MongoEventStoreService>(EVENT_STORE_BACKEND);
+    let releaseCommit!: () => void;
+    let releaseCleanup!: () => void;
+    let enteredCommit!: () => void;
+    let enteredCleanup!: () => void;
+    const commitGate = new Promise<void>(
+      (resolve) => (releaseCommit = resolve),
+    );
+    const cleanupGate = new Promise<void>(
+      (resolve) => (releaseCleanup = resolve),
+    );
+    const atCommit = new Promise<void>((resolve) => (enteredCommit = resolve));
+    const atCleanup = new Promise<void>(
+      (resolve) => (enteredCleanup = resolve),
+    );
+    let ownershipSettled = false;
+    let ownership: Promise<void> | undefined;
+    const append = backend.append.bind(
+      backend,
+    ) as MongoEventStoreService['append'];
+    const appendSpy = jest
+      .spyOn(backend, 'append')
+      .mockImplementation((messages, context, cleanup) => {
+        if (context?.retainUntil) {
+          const retain = context.retainUntil;
+          context.retainUntil = (completion) => {
+            ownership = completion.then(() => {
+              ownershipSettled = true;
+            });
+            retain(completion);
+          };
+        }
+        return append(messages, context, cleanup);
+      });
+    const original = mongo.startSession.bind(
+      mongo,
+    ) as MongoClient['startSession'];
+    const sessions = jest
+      .spyOn(mongo, 'startSession')
+      .mockImplementation((options) => {
+        const session = original(options);
+        sessions.mockRestore();
+        const commit = session.commitTransaction.bind(
+          session,
+        ) as () => Promise<void>;
+        const end = session.endSession.bind(session) as () => Promise<void>;
+        jest
+          .spyOn(session, 'commitTransaction')
+          .mockImplementation(async () => {
+            enteredCommit();
+            await commitGate;
+            await commit();
+          });
+        jest.spyOn(session, 'endSession').mockImplementation(async () => {
+          enteredCleanup();
+          await cleanupGate;
+          await end();
+        });
+        return session;
+      });
+    const event = jsonEvent({ type: 'late-ordinary', data: { value: 42 } });
+    try {
+      const result = client
+        .appendToStream('ordinary-late', event, {
+          streamState: NO_STREAM,
+          deadline: 1000,
+        })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      await atCommit;
+      expect(await result).toBeInstanceOf(Error);
+      expect(ownership).toBeDefined();
+      expect(ownershipSettled).toBe(false);
+      releaseCommit();
+      await atCleanup;
+      const ids: string[] = [];
+      for await (const { event: read } of client.readStream('ordinary-late'))
+        if (read) ids.push(read.id);
+      expect(ids).toEqual([event.id]);
+      expect(ownershipSettled).toBe(false);
+      releaseCleanup();
+      await ownership;
+      expect(ownershipSettled).toBe(true);
+    } finally {
+      releaseCommit();
+      releaseCleanup();
+      sessions.mockRestore();
+      appendSpy.mockRestore();
       await client.dispose();
       await app.close();
     }

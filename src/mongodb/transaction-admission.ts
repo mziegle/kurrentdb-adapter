@@ -1,3 +1,5 @@
+import { GroupDispatchError } from './group-dispatcher';
+
 type Waiter = {
   bytes: number;
   resolve: (release: () => void) => void;
@@ -39,22 +41,15 @@ export class TransactionAdmission {
         !Number.isSafeInteger(options.deadline))
     )
       throw new Error('invalid admission request');
-    if (this.closed)
-      return Promise.reject(
-        Object.assign(new Error('admission closed'), { code: 'closed' }),
-      );
+    if (this.closed) return Promise.reject(new GroupDispatchError('closed'));
     if (
       options.signal?.aborted ||
       (options.deadline !== undefined && options.deadline <= Date.now())
     )
-      return Promise.reject(
-        Object.assign(new Error('admission cancelled'), { code: 'cancelled' }),
-      );
+      return Promise.reject(new GroupDispatchError('cancelled'));
     for (const waiter of [...this.queue]) waiter.expire();
     if (this.count >= this.maxCount || bytes > this.maxBytes - this.bytes)
-      return Promise.reject(
-        Object.assign(new Error('admission capacity'), { code: 'capacity' }),
-      );
+      return Promise.reject(new GroupDispatchError('capacity'));
     this.count++;
     this.bytes += bytes;
     return new Promise((resolve, reject) => {
@@ -66,7 +61,7 @@ export class TransactionAdmission {
         waiter.cleanup();
         this.count--;
         this.bytes -= bytes;
-        reject(Object.assign(new Error(`admission ${code}`), { code }));
+        reject(new GroupDispatchError(code));
       };
       const cancel = () => remove('cancelled');
       const waiter: Waiter = {

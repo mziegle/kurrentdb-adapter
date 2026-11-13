@@ -85,10 +85,10 @@ database, including instances using the ordinary write path. MongoDB startup
 fails if group commit is opted in without that acknowledgement. PostgreSQL is
 unaffected. The acknowledgement does **not** enforce a single instance, fence
 other writers, prevent overlapping deployments, or establish production
-readiness. **A single adapter is not sufficient to avoid contention:** within
-one instance, eligible grouped appends and ordinary appends, soft deletes, and
-hard deletes can run concurrent transactions against the shared counter. The
-acknowledgement does not serialize them or prevent group-wide unknown outcomes.
+readiness. In this mode, grouped and ordinary mutations within the same adapter
+share bounded process-local admission, including scavenge transactions. Cleanup
+failure can retain admission indefinitely. Other adapters and direct MongoDB
+writers bypass this admission, and can still cause unknown outcomes.
 Do not enable group commit on shared or production data. Controlled
 mixed-instance tests intentionally violate the acknowledgement only on disposable
 data to study the hazard. Any value other than `true` for the opt-in keeps
@@ -118,11 +118,32 @@ Shutdown does not stop the transaction; a later commit remains possible. The
 queue counts caller-declared
 bytes rather than actual retained heap, and the test bridge uses JSON size as a
 proxy. Work failures affect the whole group, and no member replay is safe based
-on the runner's `aborted` classification alone. Concurrent ordinary and grouped
-transactions can conflict and yield an unknown error for the whole group; work
+on the runner's `aborted` classification alone. Other adapters or direct database
+writers can still conflict and yield an unknown error for the whole group; work
 is deliberately not replayed without trustworthy abort evidence. Additional real-application
 queued deadline, cancellation, shutdown, concurrent mixed-instance and broader grouped
 failover tests remain necessary. This is not production-ready.
+
+## Cooperative borrowed ownership
+
+`CooperativeDispatcher` owns the batch hold and can lend an opaque, batch-bound
+capability to `runMongoGroup`. The borrowed runner never releases that hold;
+it returns a cleanup outcome, and the dispatcher releases its hold only when
+cleanup is complete. The harness also holds `TransactionAdmission` until that
+outcome is complete. A failed or stalled abort/session cleanup keeps admission
+and capacity held; this is deliberately fail-closed and may require process
+restart. Borrowed work errors are reported unknown, not as proof of abort.
+Normal results are not published while cleanup is pending; cancellation and
+shutdown may report unknown earlier.
+
+This interface relies on the integrating runner returning the cleanup outcome
+and retaining any separate admission permit until completion. Legacy void
+runners retain their previous contract. The real AppModule uses this cooperative
+path when opted in; process-local admission does not fence other processes.
+The Mongo integration uses a disposable single-node replica set; mocked failure
+and hung-cleanup tests do not establish driver/server cleanup acknowledgement,
+failover behavior, cross-process safety, or production readiness. Run it with
+`npx jest --config test/jest-e2e.json --runInBand mongodb-cooperative-integration.e2e-spec.ts`.
 
 ## Limited performance observation
 

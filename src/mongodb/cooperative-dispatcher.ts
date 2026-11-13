@@ -1,5 +1,6 @@
 import { Batch, GroupQueue, Limits, Member } from './group-commit';
 import { GroupDispatchError } from './group-dispatcher';
+import { BorrowedGroupOutcome, BorrowedOwnership } from './group-runner';
 
 type Pending<T, R> = {
   member: Member<T, R>;
@@ -13,6 +14,7 @@ type Pending<T, R> = {
 export class CooperativeDispatcher<T, R> {
   private readonly queue: GroupQueue<T, R>;
   private readonly pending = new Map<Member<T, R>, Pending<T, R>>();
+  private readonly storageOwners = new Map<Member<T, R>, () => void>();
   private timer?: ReturnType<typeof setTimeout>;
   private running = false;
   private closed = false;
@@ -24,7 +26,8 @@ export class CooperativeDispatcher<T, R> {
     private readonly key: (value: T) => string,
     private readonly runner: (
       finalize: () => Batch<T, R> | undefined,
-    ) => Promise<void>,
+      ownership: () => BorrowedOwnership,
+    ) => Promise<void | BorrowedGroupOutcome>,
   ) {
     if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 2147483647)
       throw new Error('invalid wait window');
@@ -35,7 +38,11 @@ export class CooperativeDispatcher<T, R> {
     value: T,
     events: number,
     bytes: number,
-    options: { signal?: AbortSignal; deadline?: number } = {},
+    options: {
+      signal?: AbortSignal;
+      deadline?: number;
+      retainUntil?: (completion: Promise<void>) => void;
+    } = {},
   ): Promise<R> {
     const { signal, deadline } = options;
     if (deadline !== undefined && !Number.isSafeInteger(deadline))
@@ -46,6 +53,12 @@ export class CooperativeDispatcher<T, R> {
     for (const pending of this.pending.values()) pending.expire();
     const member = this.queue.enqueue(value, events, bytes);
     if (!member) return Promise.reject(new GroupDispatchError('capacity'));
+    if (options.retainUntil) {
+      const completion = new Promise<void>((resolve) =>
+        this.storageOwners.set(member, resolve),
+      );
+      options.retainUntil(completion);
+    }
     const result = new Promise<R>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
@@ -55,6 +68,7 @@ export class CooperativeDispatcher<T, R> {
       const cancel = () => {
         if (!this.pending.has(member)) return;
         const removed = this.queue.cancel(member);
+        if (removed) this.releaseStorage(member);
         cleanup();
         this.pending.delete(member);
         reject(new GroupDispatchError(removed ? 'cancelled' : 'unknown'));
@@ -101,6 +115,12 @@ export class CooperativeDispatcher<T, R> {
     this.timer = undefined;
   }
 
+  private releaseStorage(member: Member<T, R>): void {
+    const release = this.storageOwners.get(member);
+    this.storageOwners.delete(member);
+    release?.();
+  }
+
   private settle(): void {
     for (const [member, pending] of this.pending) {
       if (member.state !== 'settled') continue;
@@ -143,9 +163,14 @@ export class CooperativeDispatcher<T, R> {
     };
     let cleaned = false;
     void Promise.resolve()
-      .then(() => this.runner(finalize))
-      .then(() => {
-        cleaned = true;
+      .then(() =>
+        this.runner(finalize, () => {
+          if (!release || finished) throw new Error('batch not owned');
+          return batch!.borrow(release);
+        }),
+      )
+      .then((outcome) => {
+        cleaned = outcome === undefined || outcome.cleanup === 'complete';
       })
       .catch(() => undefined)
       .then(() => {
@@ -153,6 +178,7 @@ export class CooperativeDispatcher<T, R> {
         if (!batch && !this.closed) {
           for (const [member, pending] of this.pending) {
             if (!this.queue.cancel(member)) continue;
+            this.releaseStorage(member);
             pending.cleanup();
             this.pending.delete(member);
             pending.reject(new GroupDispatchError('aborted'));
@@ -160,7 +186,11 @@ export class CooperativeDispatcher<T, R> {
         }
         if (batch && !batch.settled) batch.timeout();
         this.settle();
-        if (cleaned) release?.();
+        if (cleaned) {
+          release?.();
+          for (const member of batch?.members ?? [])
+            this.releaseStorage(member);
+        }
         this.running = false;
         if (
           !this.closed &&
@@ -179,6 +209,7 @@ export class CooperativeDispatcher<T, R> {
     const draining = this.queue.shutdown(timeout);
     for (const [member, pending] of this.pending) {
       if (member.state !== 'cancelled') continue;
+      this.releaseStorage(member);
       pending.cleanup();
       this.pending.delete(member);
       pending.reject(new GroupDispatchError('closed'));

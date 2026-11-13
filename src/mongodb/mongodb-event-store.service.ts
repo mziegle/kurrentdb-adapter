@@ -1,5 +1,5 @@
 import { status } from '@grpc/grpc-js';
-import { Binary, ClientSession, Db, Document } from 'mongodb';
+import { Binary, ClientSession, Db, Document, FindCursor } from 'mongodb';
 import { StreamDeletedServiceError } from '../event-store/event-store.errors';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -36,8 +36,12 @@ import {
 } from '../postgres/postgres-value';
 import { MongoInfrastructureService } from './mongodb-infrastructure.service';
 import { parseMetadataPolicyUpdate } from '../postgres/postgres-retention';
-import { GroupDispatcher } from './group-dispatcher';
+import { CooperativeDispatcher } from './cooperative-dispatcher';
+import { GroupDispatchError } from './group-dispatcher';
+import { TransactionAdmission } from './transaction-admission';
+import { requestSize } from './request-size';
 import { runMongoGroup } from './group-runner';
+import { endOrdinarySession, OrdinaryCleanup } from './ordinary-cleanup';
 
 type GroupRequest = {
   stream: string;
@@ -74,14 +78,25 @@ function unsupported(operation: string): never {
 
 export class MongoEventStoreService implements EventStoreBackend {
   private readonly infrastructure: MongoInfrastructureService;
-  private readonly groupDispatcher?: GroupDispatcher<GroupRequest, GroupResult>;
+  private readonly groupDispatcher?: CooperativeDispatcher<
+    GroupRequest,
+    GroupResult
+  >;
+  private readonly admission?: TransactionAdmission;
+  private shuttingDown = false;
+  private readonly liveOrdinary = new Set<Promise<void>>();
+  private readonly liveReads = new Set<Promise<void>>();
+  private readonly shutdownSignal = new AbortController();
+  private closingClient?: Promise<void>;
 
   private readonly scavengeEnabled =
     process.env.MONGODB_UNSAFE_ENABLE_SCAVENGE === 'true';
   private readonly protocol = new PostgresProtocolService();
+  private readonly liveScavengeTransactions = new Set<Promise<unknown>>();
+  private unconfirmedScavengeCleanup = false;
   private readonly scavenges = new Map<
     string,
-    { cancelled: boolean; task?: Promise<void> }
+    { cancelled: boolean; controller: AbortController; task?: Promise<void> }
   >();
 
   constructor() {
@@ -100,7 +115,11 @@ export class MongoEventStoreService implements EventStoreBackend {
     if (process.env.MONGODB_EXPERIMENTAL_GROUP_COMMIT === 'true') {
       const client = this.infrastructure.getClient();
       const db = client.db(this.infrastructure.getDatabaseName());
-      this.groupDispatcher = new GroupDispatcher(
+      const admission = (this.admission = new TransactionAdmission(
+        256,
+        16 * 1024 * 1024,
+      ));
+      this.groupDispatcher = new CooperativeDispatcher(
         {
           maxRequests: 32,
           maxEvents: 32,
@@ -110,8 +129,14 @@ export class MongoEventStoreService implements EventStoreBackend {
         },
         1,
         (value) => value.stream,
-        (batch) =>
-          runMongoGroup(
+        async (finalize, ownership) => {
+          const release = await admission.acquire(1);
+          const batch = finalize();
+          if (!batch) {
+            release();
+            return;
+          }
+          const outcome = await runMongoGroup(
             client,
             batch,
             (value, session) =>
@@ -123,7 +148,11 @@ export class MongoEventStoreService implements EventStoreBackend {
                 value.events,
               ),
             { maxAttempts: 1, maxCommitAttempts: 1 },
-          ),
+            ownership(),
+          );
+          if (outcome.cleanup === 'complete') release();
+          return outcome;
+        },
       );
     }
   }
@@ -131,20 +160,240 @@ export class MongoEventStoreService implements EventStoreBackend {
   async onModuleInit(): Promise<void> {
     await this.infrastructure.connect();
   }
-  async onModuleDestroy(): Promise<void> {
-    await this.groupDispatcher?.shutdown(1000);
-    for (const scavenge of this.scavenges.values()) scavenge.cancelled = true;
-    await Promise.all(
-      [...this.scavenges.values()].flatMap((s) => (s.task ? [s.task] : [])),
-    );
+  private shutdownResponse?: Promise<void>;
 
-    await this.infrastructure.close();
+  onModuleDestroy(): Promise<void> {
+    if (this.shutdownResponse) return this.shutdownResponse;
+    this.shuttingDown = true;
+    this.shutdownSignal.abort();
+    for (const scavenge of this.scavenges.values()) {
+      scavenge.cancelled = true;
+      scavenge.controller.abort();
+    }
+    const groups = this.groupDispatcher?.shutdown(1000);
+    const admission = this.admission?.shutdown();
+    const tasks = [...this.scavenges.values()].flatMap((s) =>
+      s.task ? [s.task] : [],
+    );
+    // The timed group shutdown only settles callers. Admission and live work
+    // independently prove that the underlying transactions and cleanup ended.
+    const drained = Promise.all([
+      groups,
+      admission,
+      ...this.liveOrdinary,
+      ...this.liveReads,
+      ...tasks,
+    ]).then(async () => {
+      if (this.liveScavengeTransactions.size || this.unconfirmedScavengeCleanup)
+        throw new Error('Scavenge cleanup unconfirmed');
+      await (this.closingClient ??= this.infrastructure.close());
+    });
+    const report = (message: string) => {
+      try {
+        console.error(message);
+      } catch {
+        /* Diagnostics cannot affect safety. */
+      }
+    };
+
+    let timedOut = false;
+    void drained.catch(() => {
+      if (timedOut) {
+        report('MongoDB shutdown or client close failed after timeout');
+        process.exitCode = 1;
+      }
+    });
+    this.shutdownResponse = (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const complete = await Promise.race([
+          drained.then(() => true),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => {
+              timedOut = true;
+              process.exitCode = 1;
+              resolve(false);
+            }, 1000);
+          }),
+        ]);
+        if (!complete) report('MongoDB shutdown or client close not confirmed');
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    })();
+    return this.shutdownResponse;
+  }
+
+  private async trackRead<T>(
+    work: (cleanup: OrdinaryCleanup) => Promise<T>,
+  ): Promise<T> {
+    if (this.shuttingDown) throw new GroupDispatchError('closed');
+    let release!: () => void;
+    const live = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.liveReads.add(live);
+    const cleanup: OrdinaryCleanup = { cleanup: 'complete' };
+    try {
+      return await work(cleanup);
+    } finally {
+      if (cleanup.cleanup === 'complete') {
+        this.liveReads.delete(live);
+        release();
+      }
+    }
+  }
+
+  private async readCursor<T extends Document, R>(
+    cursor: FindCursor<T>,
+    cleanup: OrdinaryCleanup,
+    work: () => Promise<R>,
+  ): Promise<R> {
+    const previouslyUnconfirmed = cleanup.cleanup === 'unconfirmed';
+    cleanup.cleanup = 'unconfirmed';
+    try {
+      return await work();
+    } finally {
+      await cursor.close();
+      // This only confirms local driver work has settled. The driver suppresses
+      // killCursors errors; server-side cursor destruction is not confirmed.
+      if (!previouslyUnconfirmed) cleanup.cleanup = 'complete';
+    }
+  }
+
+  // findOne's internal cursor is only explicitly closed on success.
+  private async readOne<T>(
+    cleanup: OrdinaryCleanup,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const uncertain = cleanup.cleanup === 'unconfirmed';
+    cleanup.cleanup = 'unconfirmed';
+    const result = await work();
+    if (!uncertain) cleanup.cleanup = 'complete';
+    return result;
+  }
+
+  private async pollDelay(): Promise<void> {
+    if (this.shuttingDown) return;
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.shutdownSignal.signal.removeEventListener('abort', done);
+        resolve();
+      };
+      const timer = setTimeout(done, 100);
+      this.shutdownSignal.signal.addEventListener('abort', done, {
+        once: true,
+      });
+    });
+  }
+
+  private async admitted<T>(
+    bytes: number,
+    context: WriteRequestContext | undefined,
+    work: (cleanup: OrdinaryCleanup) => Promise<T>,
+    externalCleanup?: OrdinaryCleanup,
+    trackLive?: (task: Promise<T>, cleanup: OrdinaryCleanup) => void,
+  ): Promise<T> {
+    if (this.shuttingDown) throw new GroupDispatchError('closed');
+    const cleanup = externalCleanup ?? { cleanup: 'complete' };
+    const release = await this.admission?.acquire(bytes, context);
+    if (this.shuttingDown) {
+      release?.();
+      throw new GroupDispatchError('closed');
+    }
+    if (
+      context?.signal.aborted ||
+      (context?.deadline !== undefined && context.deadline <= Date.now())
+    ) {
+      release?.();
+      throw new GroupDispatchError('cancelled');
+    }
+    const task = (async () => {
+      try {
+        return await work(cleanup);
+      } catch (error) {
+        if (cleanup.cleanup === 'unconfirmed') {
+          try {
+            console.error('MongoDB ordinary cleanup unconfirmed', error);
+          } catch {
+            // Logging must not alter the uncertain transaction outcome.
+          }
+          throw new GroupDispatchError('unknown', error);
+        }
+        throw error;
+      } finally {
+        if (cleanup.cleanup === 'complete') release?.();
+      }
+    })();
+    const settled = () =>
+      cleanup.cleanup === 'complete'
+        ? Promise.resolve()
+        : new Promise<void>(() => {});
+    const live = task.then(settled, settled);
+    this.liveOrdinary.add(live);
+    void live.then(() => this.liveOrdinary.delete(live));
+    if (context?.retainUntil) {
+      context.retainUntil(live);
+    }
+    trackLive?.(task, cleanup);
+    if (!context) return task;
+    return new Promise<T>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const clear = () => {
+        context.signal.removeEventListener('abort', cancel);
+        if (timer !== undefined) clearTimeout(timer);
+      };
+      const cancel = () => {
+        if (settled) return;
+        settled = true;
+        clear();
+        reject(new GroupDispatchError('unknown'));
+      };
+      const expire = () => {
+        if (
+          context.signal.aborted ||
+          (context.deadline !== undefined && context.deadline <= Date.now())
+        ) {
+          cancel();
+        } else if (context.deadline !== undefined) {
+          if (timer !== undefined) clearTimeout(timer);
+          timer = setTimeout(
+            expire,
+            Math.min(context.deadline - Date.now(), 2147483647),
+          );
+        }
+      };
+      context.signal.addEventListener('abort', cancel, { once: true });
+      expire();
+      void task.then(
+        (value) => {
+          expire();
+          if (settled) return;
+          settled = true;
+          clear();
+          resolve(value);
+        },
+        (error: unknown) => {
+          expire();
+          if (settled) return;
+          settled = true;
+          clear();
+          // Preserve protocol errors, including non-Error driver rejections.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          reject(error);
+        },
+      );
+    });
   }
 
   async append(
     messages: AppendReq[],
     context?: WriteRequestContext,
+    cleanup?: OrdinaryCleanup,
   ): Promise<AppendResp> {
+    if (cleanup) cleanup.cleanup = 'complete';
     const options = messages.find((message) => message.options)?.options;
     if (!options?.streamIdentifier?.streamName)
       throw new Error('Append request must include a stream identifier.');
@@ -162,10 +411,12 @@ export class MongoEventStoreService implements EventStoreBackend {
       options.streamExists === undefined &&
       events.length === 1
     ) {
+      // Group cleanup is governed by its own ownership protocol.
+      if (cleanup) cleanup.cleanup = 'unconfirmed';
       const result = await this.groupDispatcher.enqueue(
         { stream: streamName, options, events },
         1,
-        Buffer.byteLength(JSON.stringify(messages)),
+        requestSize(messages, 1024 * 1024, true),
         context,
       );
       if (result.kind === 'error') throw result.error;
@@ -178,25 +429,34 @@ export class MongoEventStoreService implements EventStoreBackend {
       if (policyUpdate.policy.maxCount != null)
         safeInteger(policyUpdate.policy.maxCount);
     }
-    const client = this.infrastructure.getClient();
-    const db = client.db(this.infrastructure.getDatabaseName());
-    const session = client.startSession();
-    try {
-      const result = await session.withTransaction(() =>
-        this.appendInTransaction(
-          session,
-          db,
-          options,
-          streamName,
-          events,
-          policyUpdate,
-        ),
-      );
-      if (!result) throw new Error('MongoDB transaction returned no result');
-      return result;
-    } finally {
-      await session.endSession();
-    }
+    return this.admitted(
+      this.admission ? requestSize(messages, 16 * 1024 * 1024, true) : 0,
+      context,
+      async (cleanup) => {
+        const client = this.infrastructure.getClient();
+        const db = client.db(this.infrastructure.getDatabaseName());
+        const session = client.startSession();
+        if (cleanup) cleanup.cleanup = 'unconfirmed';
+        try {
+          const result = await session.withTransaction(() =>
+            this.appendInTransaction(
+              session,
+              db,
+              options,
+              streamName,
+              events,
+              policyUpdate,
+            ),
+          );
+          if (!result)
+            throw new Error('MongoDB transaction returned no result');
+          return result;
+        } finally {
+          await endOrdinarySession(session, cleanup);
+        }
+      },
+      cleanup,
+    );
   }
 
   /** The only isolated member error occurs before event writes. */
@@ -385,6 +645,13 @@ export class MongoEventStoreService implements EventStoreBackend {
   }
 
   async read(request: ReadReq): Promise<ReadResp[]> {
+    return this.trackRead((cleanup) => this.readTracked(request, cleanup));
+  }
+
+  private async readTracked(
+    request: ReadReq,
+    cleanup: OrdinaryCleanup,
+  ): Promise<ReadResp[]> {
     const options = request.options;
     if (!options) throw new Error('Read request must include options.');
     if (options.stream?.revision !== undefined)
@@ -406,14 +673,16 @@ export class MongoEventStoreService implements EventStoreBackend {
         Object.assign(filter, this.readFilter(options.filter));
       if (boundary !== undefined)
         filter.position = backwards ? { $lte: boundary } : { $gte: boundary };
-      const rows = await this.infrastructure
+      const cursor = this.infrastructure
         .getClient()
         .db(this.infrastructure.getDatabaseName())
         .collection('stream_events')
         .find(filter)
         .sort({ position: backwards ? -1 : 1 })
-        .limit(options.count === undefined ? 100 : toNumber(options.count))
-        .toArray();
+        .limit(options.count === undefined ? 100 : toNumber(options.count));
+      const rows = await this.readCursor(cursor, cleanup, () =>
+        cursor.toArray(),
+      );
       return rows.length
         ? rows.map((row) => this.mapRow(row))
         : [{ caughtUp: { timestamp: undefined } }];
@@ -427,12 +696,16 @@ export class MongoEventStoreService implements EventStoreBackend {
     const client = this.infrastructure.getClient();
     const db = client.db(this.infrastructure.getDatabaseName());
     const session = client.startSession();
+    cleanup.cleanup = 'unconfirmed';
+    const cursorCleanup: OrdinaryCleanup = { cleanup: 'complete' };
     try {
       return await session.withTransaction(
         async () => {
-          const state = await db
-            .collection('streams')
-            .findOne({ _id: streamName } as Document, { session });
+          const state = await this.readOne(cursorCleanup, () =>
+            db
+              .collection('streams')
+              .findOne({ _id: streamName } as Document, { session }),
+          );
           if (state?.tombstoned)
             throw new StreamDeletedServiceError(streamName);
           if (!state || state.deleted)
@@ -448,9 +721,11 @@ export class MongoEventStoreService implements EventStoreBackend {
             stream.revision === undefined
               ? undefined
               : toNumber(stream.revision);
-          const policy = await db
-            .collection('retention')
-            .findOne({ _id: streamName } as Document, { session });
+          const policy = await this.readOne(cursorCleanup, () =>
+            db
+              .collection('retention')
+              .findOne({ _id: streamName } as Document, { session }),
+          );
           const visibleFrom = this.visibleFrom(state, policy);
           const filter: Document = {
             streamName,
@@ -465,18 +740,21 @@ export class MongoEventStoreService implements EventStoreBackend {
             filter.createdAt = {
               $gte: new Date(Date.now() - Number(policy.maxAge) * 1000),
             };
-          const rows = await db
+          const cursor = db
             .collection('stream_events')
             .find(filter, { session })
             .sort({ revision: backwards ? -1 : 1 })
-            .limit(options.count === undefined ? 100 : toNumber(options.count))
-            .toArray();
+            .limit(options.count === undefined ? 100 : toNumber(options.count));
+          const rows = await this.readCursor(cursor, cursorCleanup, () =>
+            cursor.toArray(),
+          );
           return rows.map((row) => this.mapRow(row));
         },
         { readConcern: { level: 'snapshot' } },
       );
     } finally {
       await session.endSession();
+      cleanup.cleanup = cursorCleanup.cleanup;
     }
   }
 
@@ -623,20 +901,25 @@ export class MongoEventStoreService implements EventStoreBackend {
       ? toNumber(options.all.position.commitPosition ?? 0)
       : -1;
     if (options.all?.end !== undefined) {
-      const last = await events.find().sort({ position: -1 }).limit(1).next();
+      const last = await this.trackRead(async (cleanup) => {
+        const cursor = events.find().sort({ position: -1 }).limit(1);
+        return this.readCursor(cursor, cleanup, () => cursor.next());
+      });
       position = last ? safeInteger(last.position) : -1;
     }
     yield { confirmation: { subscriptionId: randomUUID() } };
     let caughtUp = false;
-    while (!isCancelled()) {
-      const rows = await events
-        .find({ ...filter, position: { $gt: position } })
-        .sort({ position: 1 })
-        .limit(256)
-        .toArray();
+    while (!this.shuttingDown && !isCancelled()) {
+      const rows = await this.trackRead(async (cleanup) => {
+        const cursor = events
+          .find({ ...filter, position: { $gt: position } })
+          .sort({ position: 1 })
+          .limit(256);
+        return this.readCursor(cursor, cleanup, () => cursor.toArray());
+      });
       if (rows.length) {
         for (const row of rows) {
-          if (isCancelled()) return;
+          if (this.shuttingDown || isCancelled()) return;
           position = safeInteger(row.position);
           yield this.mapRow(row);
         }
@@ -646,7 +929,7 @@ export class MongoEventStoreService implements EventStoreBackend {
         yield { caughtUp: { timestamp: createTimestamp() } };
         caughtUp = true;
       }
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await this.pollDelay();
     }
   }
 
@@ -654,6 +937,7 @@ export class MongoEventStoreService implements EventStoreBackend {
     request: ReadReq,
     isCancelled: () => boolean,
   ): AsyncGenerator<ReadResp> {
+    if (this.shuttingDown) throw new GroupDispatchError('closed');
     const options = request.options;
     if (options?.all) {
       if (options.resolveLinks || isBackwardsRead(options.readDirection))
@@ -683,79 +967,91 @@ export class MongoEventStoreService implements EventStoreBackend {
         ? toNumber(options.stream.revision)
         : -1;
     if (options.stream.end !== undefined) {
-      const state = await db
-        .collection('streams')
-        .findOne({ _id: streamName } as Document);
+      const state = await this.trackRead((cleanup) =>
+        this.readOne(cleanup, () =>
+          db.collection('streams').findOne({ _id: streamName } as Document),
+        ),
+      );
       lastRevision =
         state?.revision === undefined ? -1 : safeInteger(state.revision);
     }
     yield { confirmation: { subscriptionId: randomUUID() } };
     let caughtUp = false;
-    while (!isCancelled()) {
-      const session = this.infrastructure.getClient().startSession();
-      let rows: Document[];
-      try {
-        const batch = await session.withTransaction(
-          async () => {
-            const state = await db
-              .collection('streams')
-              .findOne({ _id: streamName } as Document, { session });
-            if (state?.tombstoned)
-              throw new StreamDeletedServiceError(streamName);
-            const policy = await db
-              .collection('retention')
-              .findOne({ _id: streamName } as Document, { session });
-            const visibleRevision = Math.max(
-              lastRevision,
-              this.visibleFrom(state ?? {}, policy) - 1,
-            );
-            if (!state || state.deleted)
+    while (!this.shuttingDown && !isCancelled()) {
+      const batch = await this.trackRead(async (cleanup) => {
+        const session = this.infrastructure.getClient().startSession();
+        cleanup.cleanup = 'unconfirmed';
+        const cursorCleanup: OrdinaryCleanup = { cleanup: 'complete' };
+        try {
+          return await session.withTransaction(
+            async () => {
+              const state = await this.readOne(cursorCleanup, () =>
+                db
+                  .collection('streams')
+                  .findOne({ _id: streamName } as Document, { session }),
+              );
+              if (state?.tombstoned)
+                throw new StreamDeletedServiceError(streamName);
+              const policy = await this.readOne(cursorCleanup, () =>
+                db
+                  .collection('retention')
+                  .findOne({ _id: streamName } as Document, { session }),
+              );
+              const visibleRevision = Math.max(
+                lastRevision,
+                this.visibleFrom(state ?? {}, policy) - 1,
+              );
+              if (!state || state.deleted)
+                return {
+                  rows: [],
+                  visibleRevision: Math.max(
+                    lastRevision,
+                    safeInteger(state?.visibleFrom ?? 0) - 1,
+                  ),
+                };
+              const cursor = events
+                .find(
+                  {
+                    streamName,
+                    generation: 0,
+                    revision: { $gt: visibleRevision },
+                    ...(policy?.maxAge == null
+                      ? {}
+                      : {
+                          createdAt: {
+                            $gte: new Date(
+                              Date.now() - Number(policy.maxAge) * 1000,
+                            ),
+                          },
+                        }),
+                  },
+                  { session },
+                )
+                .sort({ revision: 1 })
+                .limit(256);
+              const rows = await this.readCursor(cursor, cursorCleanup, () =>
+                cursor.toArray(),
+              );
               return {
-                rows: [],
+                rows,
                 visibleRevision: Math.max(
                   lastRevision,
-                  safeInteger(state?.visibleFrom ?? 0) - 1,
+                  Math.min(visibleRevision, safeInteger(state.revision)),
                 ),
               };
-            const rows = await events
-              .find(
-                {
-                  streamName,
-                  generation: 0,
-                  revision: { $gt: visibleRevision },
-                  ...(policy?.maxAge == null
-                    ? {}
-                    : {
-                        createdAt: {
-                          $gte: new Date(
-                            Date.now() - Number(policy.maxAge) * 1000,
-                          ),
-                        },
-                      }),
-                },
-                { session },
-              )
-              .sort({ revision: 1 })
-              .limit(256)
-              .toArray();
-            return {
-              rows,
-              visibleRevision: Math.max(
-                lastRevision,
-                Math.min(visibleRevision, safeInteger(state.revision)),
-              ),
-            };
-          },
-          { readConcern: { level: 'snapshot' } },
-        );
-        rows = batch.rows;
-        lastRevision = batch.visibleRevision;
-      } finally {
-        await session.endSession();
-      }
+            },
+            { readConcern: { level: 'snapshot' } },
+          );
+        } finally {
+          await session.endSession();
+          cleanup.cleanup = cursorCleanup.cleanup;
+        }
+      });
+      const rows = batch.rows;
+      lastRevision = batch.visibleRevision;
       if (rows.length) {
         for (const row of rows) {
-          if (isCancelled()) return;
+          if (this.shuttingDown || isCancelled()) return;
           lastRevision = safeInteger(row.revision);
           yield this.mapRow(row);
         }
@@ -770,169 +1066,207 @@ export class MongoEventStoreService implements EventStoreBackend {
         };
         caughtUp = true;
       }
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      await this.pollDelay();
     }
   }
-  async delete(request: DeleteReq): Promise<DeleteResp> {
+  async delete(
+    request: DeleteReq,
+    context?: WriteRequestContext,
+    cleanup?: OrdinaryCleanup,
+  ): Promise<DeleteResp> {
+    if (cleanup) cleanup.cleanup = 'complete';
     const options = request.options;
     if (!options?.streamIdentifier?.streamName)
       throw new Error('Missing stream identifier');
     const streamName = decodeStreamName(options.streamIdentifier.streamName);
     if (streamName.startsWith('$$'))
       return unsupported('stream metadata and retention');
-    const client = this.infrastructure.getClient();
-    const db = client.db(this.infrastructure.getDatabaseName());
-    const session = client.startSession();
-    try {
-      return await session.withTransaction(async () => {
-        await db
-          .collection('counters')
-          .updateOne(
-            { _id: 'global' } as Document,
-            { $inc: { value: 0 } },
-            { upsert: true, session },
-          );
-        const state = await db
-          .collection('streams')
-          .findOne({ _id: streamName } as Document, { session });
-        if (state?.tombstoned) throw new StreamDeletedServiceError(streamName);
-        const current =
-          state?.revision === undefined || state.deleted
-            ? null
-            : safeInteger(state.revision);
-        const expected =
-          options.revision === undefined
-            ? undefined
-            : toNumber(options.revision);
-        if (
-          !(
-            options.any !== undefined ||
-            (options.noStream !== undefined && current === null) ||
-            (options.streamExists !== undefined && current !== null) ||
-            (expected !== undefined && expected === current)
-          )
-        ) {
-          throw this.protocol.createWrongExpectedVersionError(
-            streamName,
-            expected,
-            current,
-          );
+    return this.admitted(
+      this.admission ? requestSize(request, 16 * 1024 * 1024, true) : 0,
+      context,
+      async (cleanup) => {
+        const client = this.infrastructure.getClient();
+        const db = client.db(this.infrastructure.getDatabaseName());
+        const session = client.startSession();
+        if (cleanup) cleanup.cleanup = 'unconfirmed';
+        try {
+          return await session.withTransaction(async () => {
+            await db
+              .collection('counters')
+              .updateOne(
+                { _id: 'global' } as Document,
+                { $inc: { value: 0 } },
+                { upsert: true, session },
+              );
+            const state = await db
+              .collection('streams')
+              .findOne({ _id: streamName } as Document, { session });
+            if (state?.tombstoned)
+              throw new StreamDeletedServiceError(streamName);
+            const current =
+              state?.revision === undefined || state.deleted
+                ? null
+                : safeInteger(state.revision);
+            const expected =
+              options.revision === undefined
+                ? undefined
+                : toNumber(options.revision);
+            if (
+              !(
+                options.any !== undefined ||
+                (options.noStream !== undefined && current === null) ||
+                (options.streamExists !== undefined && current !== null) ||
+                (expected !== undefined && expected === current)
+              )
+            ) {
+              throw this.protocol.createWrongExpectedVersionError(
+                streamName,
+                expected,
+                current,
+              );
+            }
+            if (current === null) return { noPosition: {} };
+            const last = await db
+              .collection('stream_events')
+              .findOne(
+                { streamName, generation: 0, revision: current },
+                { session },
+              );
+            await db.collection('streams').updateOne(
+              { _id: streamName } as Document,
+              {
+                $set: {
+                  deleted: true,
+                  visibleFrom: safeInteger(current + 1),
+                },
+              },
+              { session },
+            );
+            const position = safeInteger(last!.position);
+            return {
+              position: { commitPosition: position, preparePosition: position },
+            };
+          });
+        } finally {
+          await endOrdinarySession(session, cleanup);
         }
-        if (current === null) return { noPosition: {} };
-        const last = await db
-          .collection('stream_events')
-          .findOne(
-            { streamName, generation: 0, revision: current },
-            { session },
-          );
-        await db
-          .collection('streams')
-          .updateOne(
-            { _id: streamName } as Document,
-            { $set: { deleted: true, visibleFrom: safeInteger(current + 1) } },
-            { session },
-          );
-        const position = safeInteger(last!.position);
-        return {
-          position: { commitPosition: position, preparePosition: position },
-        };
-      });
-    } finally {
-      await session.endSession();
-    }
+      },
+      cleanup,
+    );
   }
-  async tombstone(request: TombstoneReq): Promise<TombstoneResp> {
+  async tombstone(
+    request: TombstoneReq,
+    context?: WriteRequestContext,
+    cleanup?: OrdinaryCleanup,
+  ): Promise<TombstoneResp> {
+    if (cleanup) cleanup.cleanup = 'complete';
     const options = request.options;
     if (!options?.streamIdentifier?.streamName)
       throw new Error('Missing stream identifier');
     const streamName = decodeStreamName(options.streamIdentifier.streamName);
     if (streamName.startsWith('$$'))
       return unsupported('stream metadata and retention');
-    const client = this.infrastructure.getClient();
-    const db = client.db(this.infrastructure.getDatabaseName());
-    const session = client.startSession();
-    try {
-      return await session.withTransaction(async () => {
-        const counter = await db
-          .collection('counters')
-          .findOneAndUpdate(
-            { _id: 'global' } as Document,
-            { $inc: { value: 1 } },
-            { upsert: true, returnDocument: 'after', session },
-          );
-        const state = await db
-          .collection('streams')
-          .findOne({ _id: streamName } as Document, { session });
-        if (state?.tombstoned) throw new StreamDeletedServiceError(streamName);
-        const current =
-          state?.revision === undefined || state.deleted
-            ? null
-            : safeInteger(state.revision);
-        const expected =
-          options.revision === undefined
-            ? undefined
-            : toNumber(options.revision);
-        if (
-          !(
-            options.any !== undefined ||
-            (options.noStream !== undefined && current === null) ||
-            (options.streamExists !== undefined && current !== null) ||
-            (expected !== undefined && expected === current)
-          )
-        ) {
-          throw this.protocol.createWrongExpectedVersionError(
-            streamName,
-            expected,
-            current,
-          );
+    return this.admitted(
+      this.admission ? requestSize(request, 16 * 1024 * 1024, true) : 0,
+      context,
+      async (cleanup) => {
+        const client = this.infrastructure.getClient();
+        const db = client.db(this.infrastructure.getDatabaseName());
+        const session = client.startSession();
+        if (cleanup) cleanup.cleanup = 'unconfirmed';
+        try {
+          return await session.withTransaction(async () => {
+            const counter = await db
+              .collection('counters')
+              .findOneAndUpdate(
+                { _id: 'global' } as Document,
+                { $inc: { value: 1 } },
+                { upsert: true, returnDocument: 'after', session },
+              );
+            const state = await db
+              .collection('streams')
+              .findOne({ _id: streamName } as Document, { session });
+            if (state?.tombstoned)
+              throw new StreamDeletedServiceError(streamName);
+            const current =
+              state?.revision === undefined || state.deleted
+                ? null
+                : safeInteger(state.revision);
+            const expected =
+              options.revision === undefined
+                ? undefined
+                : toNumber(options.revision);
+            if (
+              !(
+                options.any !== undefined ||
+                (options.noStream !== undefined && current === null) ||
+                (options.streamExists !== undefined && current !== null) ||
+                (expected !== undefined && expected === current)
+              )
+            ) {
+              throw this.protocol.createWrongExpectedVersionError(
+                streamName,
+                expected,
+                current,
+              );
+            }
+            const revision = safeInteger(
+              (state?.revision === undefined
+                ? -1
+                : safeInteger(state.revision)) + 1,
+            );
+            const position = safeInteger(counter!.value);
+            await db.collection('stream_events').insertOne(
+              {
+                streamName,
+                generation: 0,
+                revision,
+                eventId: randomUUID(),
+                position,
+                createdAt: new Date(),
+                metadata: {
+                  type: '$streamDeleted',
+                  'content-type': 'application/octet-stream',
+                },
+                customMetadata: Buffer.alloc(0),
+                data: Buffer.alloc(0),
+              },
+              { session },
+            );
+            await db
+              .collection('streams')
+              .updateOne(
+                { _id: streamName } as Document,
+                { $set: { revision, tombstoned: true } },
+                { upsert: true, session },
+              );
+            return {
+              position: { commitPosition: position, preparePosition: position },
+            };
+          });
+        } finally {
+          await endOrdinarySession(session, cleanup);
         }
-        const revision = safeInteger(
-          (state?.revision === undefined ? -1 : safeInteger(state.revision)) +
-            1,
-        );
-        const position = safeInteger(counter!.value);
-        await db.collection('stream_events').insertOne(
-          {
-            streamName,
-            generation: 0,
-            revision,
-            eventId: randomUUID(),
-            position,
-            createdAt: new Date(),
-            metadata: {
-              type: '$streamDeleted',
-              'content-type': 'application/octet-stream',
-            },
-            customMetadata: Buffer.alloc(0),
-            data: Buffer.alloc(0),
-          },
-          { session },
-        );
-        await db
-          .collection('streams')
-          .updateOne(
-            { _id: streamName } as Document,
-            { $set: { revision, tombstoned: true } },
-            { upsert: true, session },
-          );
-        return {
-          position: { commitPosition: position, preparePosition: position },
-        };
-      });
-    } finally {
-      await session.endSession();
-    }
+      },
+      cleanup,
+    );
   }
   startScavenge(): ScavengeResp {
+    if (this.shuttingDown) throw new GroupDispatchError('closed');
     if (!this.scavengeEnabled) unsupported('scavenging (disabled by default)');
     const scavengeId = randomUUID();
-    const state: { cancelled: boolean; task?: Promise<void> } = {
+    const state: {
+      cancelled: boolean;
+      controller: AbortController;
+      task?: Promise<void>;
+    } = {
       cancelled: false,
+      controller: new AbortController(),
     };
     this.scavenges.set(scavengeId, state);
     state.task = this.runScavenge(state)
       .catch((error: unknown) => {
-        console.error('MongoDB scavenge failed', error);
+        if (!state.cancelled) console.error('MongoDB scavenge failed', error);
       })
       .finally(() => this.scavenges.delete(scavengeId));
     return { scavengeId, scavengeResult: ScavengeResp_ScavengeResult.Started };
@@ -940,87 +1274,122 @@ export class MongoEventStoreService implements EventStoreBackend {
   stopScavenge(request: StopScavengeReq): ScavengeResp {
     const scavengeId = request.options?.scavengeId ?? '';
     const state = this.scavenges.get(scavengeId);
-    if (state) state.cancelled = true;
+    if (state) {
+      state.cancelled = true;
+      state.controller.abort();
+    }
     return { scavengeId, scavengeResult: ScavengeResp_ScavengeResult.Stopped };
   }
 
-  private async runScavenge(state: { cancelled: boolean }): Promise<void> {
+  private async runScavenge(state: {
+    cancelled: boolean;
+    controller: AbortController;
+  }): Promise<void> {
     const client = this.infrastructure.getClient();
     const db = client.db(this.infrastructure.getDatabaseName());
     const cursor = db
       .collection('streams')
-      .find({}, { projection: { _id: 1 } });
+      .find({}, { projection: { _id: 1 }, signal: state.controller.signal });
     try {
       for await (const stream of cursor) {
         if (state.cancelled) break;
         const streamName = String(stream._id);
-        const session = client.startSession();
-        try {
-          await session.withTransaction(
-            async () => {
-              // A real write to the same counter document used by all mutations
-              // prevents stale policy or stream snapshots from deleting live data.
-              await db
-                .collection('counters')
-                .updateOne(
-                  { _id: 'global' } as Document,
-                  { $inc: { scavengeEpoch: 1 } },
-                  { upsert: true, session },
-                );
-              const current = await db
-                .collection('streams')
-                .findOne({ _id: streamName } as Document, { session });
-              if (!current || current.revision === undefined) return;
-              const policy = await db
-                .collection('retention')
-                .findOne({ _id: streamName } as Document, { session });
-              const last = safeInteger(current.revision);
-              const before =
-                current.tombstoned || current.deleted
-                  ? last
-                  : this.visibleFrom(current, policy);
-              const conditions: Document[] = [{ revision: { $lt: before } }];
-              if (streamName.startsWith('$$')) {
-                const latestMetadata = await db
-                  .collection('stream_events')
-                  .findOne(
+        await this.admitted(
+          1,
+          { signal: state.controller.signal },
+          async (cleanup) => {
+            if (state.cancelled) return;
+            const session = client.startSession();
+            cleanup.cleanup = 'unconfirmed';
+            try {
+              await session.withTransaction(
+                async () => {
+                  // A real write to the same counter document used by all mutations
+                  // prevents stale policy or stream snapshots from deleting live data.
+                  await db
+                    .collection('counters')
+                    .updateOne(
+                      { _id: 'global' } as Document,
+                      { $inc: { scavengeEpoch: 1 } },
+                      { upsert: true, session },
+                    );
+                  const current = await db
+                    .collection('streams')
+                    .findOne({ _id: streamName } as Document, { session });
+                  if (!current || current.revision === undefined) return;
+                  const policy = await db
+                    .collection('retention')
+                    .findOne({ _id: streamName } as Document, { session });
+                  const last = safeInteger(current.revision);
+                  const before =
+                    current.tombstoned || current.deleted
+                      ? last
+                      : this.visibleFrom(current, policy);
+                  const conditions: Document[] = [
+                    { revision: { $lt: before } },
+                  ];
+                  if (streamName.startsWith('$$')) {
+                    const latestMetadata = await db
+                      .collection('stream_events')
+                      .findOne(
+                        {
+                          streamName,
+                          'metadata.type': '$metadata',
+                          'metadata.content-type': 'application/json',
+                        },
+                        { sort: { revision: -1 }, session },
+                      );
+                    if (latestMetadata)
+                      conditions.push({
+                        'metadata.type': '$metadata',
+                        'metadata.content-type': 'application/json',
+                        revision: { $lt: safeInteger(latestMetadata.revision) },
+                      });
+                  }
+                  if (policy?.maxAge != null)
+                    conditions.push({
+                      createdAt: {
+                        $lt: new Date(
+                          Date.now() - Number(policy.maxAge) * 1000,
+                        ),
+                      },
+                    });
+                  await db.collection('stream_events').deleteMany(
                     {
                       streamName,
-                      'metadata.type': '$metadata',
-                      'metadata.content-type': 'application/json',
+                      revision: { $lt: last },
+                      $or: conditions,
                     },
-                    { sort: { revision: -1 }, session },
+                    { session },
                   );
-                if (latestMetadata)
-                  conditions.push({
-                    'metadata.type': '$metadata',
-                    'metadata.content-type': 'application/json',
-                    revision: { $lt: safeInteger(latestMetadata.revision) },
-                  });
-              }
-              if (policy?.maxAge != null)
-                conditions.push({
-                  createdAt: {
-                    $lt: new Date(Date.now() - Number(policy.maxAge) * 1000),
-                  },
-                });
-              await db.collection('stream_events').deleteMany(
-                {
-                  streamName,
-                  revision: { $lt: last },
-                  $or: conditions,
                 },
-                { session },
+                { readConcern: { level: 'snapshot' } },
               );
-            },
-            { readConcern: { level: 'snapshot' } },
-          );
-        } finally {
-          await session.endSession();
-        }
+            } finally {
+              await endOrdinarySession(session, cleanup);
+            }
+          },
+          undefined,
+          (task, cleanup) => {
+            this.liveScavengeTransactions.add(task);
+            void task.then(
+              () => {
+                if (cleanup.cleanup === 'complete')
+                  this.liveScavengeTransactions.delete(task);
+              },
+              () => {
+                if (cleanup.cleanup === 'complete')
+                  this.liveScavengeTransactions.delete(task);
+              },
+            );
+          },
+        );
       }
     } finally {
-      await cursor.close();
+      await cursor.close().catch((error: unknown) => {
+        this.unconfirmedScavengeCleanup = true;
+        throw error;
+      });
     }
   }
 }

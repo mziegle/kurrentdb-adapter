@@ -10,7 +10,12 @@ import {
   UnknownError,
 } from '@kurrent/kurrentdb-client';
 import { GenericContainer, StartedTestContainer, Wait } from 'testcontainers';
-import { ClientSession, MongoClient } from 'mongodb';
+import {
+  ClientSession,
+  CommandStartedEvent,
+  CommandSucceededEvent,
+  MongoClient,
+} from 'mongodb';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
@@ -129,30 +134,52 @@ describe('MongoDB replica-set election through the official client', () => {
   });
 
   it('preserves acknowledged grouped writes across election and continues positions', async () => {
-    const commits: Record<string, unknown>[] = [];
-    const listener = (event: {
-      commandName: string;
-      command: Record<string, unknown>;
-    }) => {
-      if (event.commandName === 'commitTransaction')
-        commits.push(event.command);
+    const started = new Map<number, Record<string, unknown>>();
+    const committed = new Map<string, Record<string, unknown>>();
+    const unmatched: number[] = [];
+    const onStarted = (event: CommandStartedEvent) => {
+      if (event.commandName === 'commitTransaction') {
+        const command: Record<string, unknown> = event.command;
+        started.set(event.requestId, command);
+      }
     };
-    mongo.on('commandStarted', listener);
+    const onSucceeded = (event: CommandSucceededEvent) => {
+      if (event.commandName !== 'commitTransaction') return;
+      const command = started.get(event.requestId);
+      if (!command) {
+        unmatched.push(event.requestId);
+        return;
+      }
+      committed.set(JSON.stringify([command.lsid, command.txnNumber]), command);
+    };
+    const verifyCommits = () => {
+      expect(unmatched).toEqual([]);
+      for (const command of started.values()) {
+        expect(command.writeConcern).toMatchObject({ w: 'majority', j: true });
+        expect(command.lsid).toBeDefined();
+        expect(command.txnNumber).toBeDefined();
+      }
+    };
+    mongo.on('commandStarted', onStarted);
+    mongo.on('commandSucceeded', onSucceeded);
     const before = ['group-election-a', 'group-election-b'].map((stream) => ({
       stream,
       event: jsonEvent({ type: 'group-before', data: { stream } }),
     }));
     try {
-      const acknowledged = await Promise.all(
-        before.map(({ stream, event }) =>
-          client.appendToStream(stream, event, {
+      const acknowledged: Awaited<ReturnType<typeof client.appendToStream>>[] =
+        [];
+      for (const { stream, event } of before) {
+        acknowledged.push(
+          await client.appendToStream(stream, event, {
             streamState: ANY,
             deadline: 10000,
           }),
-        ),
-      );
-      expect(commits).toHaveLength(1);
-      expect(commits[0].writeConcern).toMatchObject({ w: 'majority', j: true });
+        );
+      }
+      // Waiting for the first acknowledgement forces two independent groups.
+      expect(committed.size).toBe(2);
+      verifyCommits();
       const oldPrimary = await awaitPrimary();
       await docker('docker', ['pause', containers[oldPrimary].getId()]);
       try {
@@ -163,7 +190,8 @@ describe('MongoDB replica-set election through the official client', () => {
             if (item.event) found.push(item.event.id);
           expect(found).toEqual([event.id]);
         }
-        commits.length = 0;
+        committed.clear();
+        started.clear();
         const after = ['group-election-c', 'group-election-d'].map(
           (stream) => ({
             stream,
@@ -178,11 +206,9 @@ describe('MongoDB replica-set election through the official client', () => {
             }),
           ),
         );
-        expect(commits).toHaveLength(1);
-        expect(commits[0].writeConcern).toMatchObject({
-          w: 'majority',
-          j: true,
-        });
+        expect(committed.size).toBeGreaterThanOrEqual(1);
+        expect(committed.size).toBeLessThanOrEqual(2);
+        verifyCommits();
         const positions = [...acknowledged, ...later]
           .map((result) => result.position!.commit)
           .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
@@ -205,11 +231,17 @@ describe('MongoDB replica-set election through the official client', () => {
             .map((record) => record.position)
             .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
         ).toEqual(positions);
+        for (const [index, item] of [...before, ...after].entries()) {
+          expect(
+            records.find((record) => record.id === item.event.id)?.position,
+          ).toBe([...acknowledged, ...later][index].position!.commit);
+        }
       } finally {
         await docker('docker', ['unpause', containers[oldPrimary].getId()]);
       }
     } finally {
-      mongo.off('commandStarted', listener);
+      mongo.off('commandStarted', onStarted);
+      mongo.off('commandSucceeded', onSucceeded);
     }
   });
 

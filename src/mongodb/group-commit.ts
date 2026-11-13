@@ -29,6 +29,12 @@ function internal<T, R>(member: Member<T, R>): Internal<R> {
 }
 
 const batchKey = Symbol();
+declare const borrowedBrand: unique symbol;
+export type BorrowedOwnership = { readonly [borrowedBrand]: true };
+const borrowedOwners = new WeakMap<
+  object,
+  { batch: object; owner: () => void }
+>();
 const timedOutBatches = new WeakSet<object>();
 export function hasBatchTimedOut(batch: object): boolean {
   return timedOutBatches.has(batch);
@@ -67,6 +73,16 @@ export class Batch<T, R> {
     };
     this.#owner = release;
     return release;
+  }
+  borrow(owner: () => void): BorrowedOwnership {
+    if (this.#owner !== owner) throw new Error('invalid owner');
+    const token = Object.freeze({}) as BorrowedOwnership;
+    borrowedOwners.set(token, { batch: this, owner });
+    return token;
+  }
+  ownsBorrow(ownership: BorrowedOwnership): boolean {
+    const borrowed = borrowedOwners.get(ownership);
+    return borrowed?.batch === this && borrowed.owner === this.#owner;
   }
   #releaseIfDone(): void {
     if (this.#done && !this.#holds && !this.#released) {

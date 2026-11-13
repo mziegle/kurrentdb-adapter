@@ -1,3 +1,14 @@
+import { GroupDispatchError } from './group-dispatcher';
+
+test('pre-start admission capacity is a correlated dispatch error', async () => {
+  const admission = new TransactionAdmission(1, 100);
+  const release = await admission.acquire(1);
+  const error = await admission.acquire(1).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(GroupDispatchError);
+  expect(error).toMatchObject({ code: 'capacity' });
+  release();
+});
+
 import { TransactionAdmission } from './transaction-admission';
 
 describe('TransactionAdmission', () => {

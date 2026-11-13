@@ -1,6 +1,10 @@
 import { EventEmitter } from 'node:events';
 import { Metadata } from '@grpc/grpc-js';
 import { StreamsController } from './streams.controller';
+import { BatchAppendSession } from './batch-append-session';
+import { MongoEventStoreService } from '../mongodb/mongodb-event-store.service';
+import { TransactionAdmission } from '../mongodb/transaction-admission';
+import { CooperativeDispatcher } from '../mongodb/cooperative-dispatcher';
 
 class Call extends EventEmitter {
   metadata = new Metadata();
@@ -30,6 +34,157 @@ const deferred = () => {
 const stats = { startOperation: () => ({ succeeded() {}, failed() {} }) };
 
 describe('write context from gRPC streams', () => {
+  it('retains session capacity after a sealed group becomes unknown until group cleanup', async () => {
+    const service = new MongoEventStoreService();
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const dispatcher = new CooperativeDispatcher(
+      { maxRequests: 1, maxEvents: 1, maxBytes: 1024 * 1024 },
+      0,
+      () => 's',
+      async (finalize) => {
+        finalize();
+        await gate;
+      },
+    );
+    Object.defineProperty(service, 'groupDispatcher', { value: dispatcher });
+    let observed!: BatchAppendSession;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const original = BatchAppendSession.prototype.onData;
+    const spy = jest
+      .spyOn(BatchAppendSession.prototype, 'onData')
+      .mockImplementation(function (this: BatchAppendSession, message) {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
+        observed = this;
+        original.call(this, message);
+      });
+    try {
+      const call = new Call();
+      new StreamsController(service, stats as never).batchAppend(call as never);
+      call.emit('data', {
+        correlationId: { string: '00000000-0000-0000-0000-000000000001' },
+        options: {
+          streamIdentifier: { streamName: Buffer.from('s') },
+          any: {},
+          deadline: { seconds: 0, nanos: 50000000 },
+        },
+        proposedMessages: [
+          {
+            id: { string: 'id' },
+            metadata: { type: 'event' },
+            data: Buffer.alloc(1024),
+            customMetadata: Buffer.alloc(0),
+          },
+        ],
+        isFinal: true,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(observed['activeWrites']).toBe(1);
+      expect(observed['retainedBytes']).toBeGreaterThanOrEqual(1024);
+      finish();
+      await tick();
+      expect(observed['activeWrites']).toBe(0);
+    } finally {
+      finish();
+      spy.mockRestore();
+      await dispatcher.shutdown(0);
+    }
+  });
+  it('retains session capacity after deadline until gated transaction and cleanup settle', async () => {
+    const service = new MongoEventStoreService();
+    Object.defineProperty(service, 'admission', {
+      value: new TransactionAdmission(1, 16 * 1024 * 1024),
+    });
+    let finishTransaction!: () => void;
+    let finishCleanup!: () => void;
+    const transaction = new Promise<void>((resolve) => {
+      finishTransaction = resolve;
+    });
+    const cleanup = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    let live = false;
+    jest.spyOn(service['infrastructure'], 'getClient').mockReturnValue({
+      db: () => ({}),
+      startSession: () => ({
+        withTransaction: async () => {
+          live = true;
+          await transaction;
+          live = false;
+          return { success: { noStream: {} } };
+        },
+        endSession: () => cleanup,
+      }),
+    } as never);
+    let observed!: BatchAppendSession;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const original = BatchAppendSession.prototype.onData;
+    const spy = jest
+      .spyOn(BatchAppendSession.prototype, 'onData')
+      .mockImplementation(function (this: BatchAppendSession, message) {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
+        observed = this;
+        original.call(this, message);
+      });
+    try {
+      const controller = new StreamsController(service, stats as never);
+      const call = new Call();
+      controller.batchAppend(call as never);
+      call.emit('data', {
+        correlationId: { string: '00000000-0000-0000-0000-000000000001' },
+        options: {
+          streamIdentifier: { streamName: Buffer.from('s') },
+          noStream: {},
+          deadline: { seconds: 0, nanos: 50000000 },
+        },
+        proposedMessages: [
+          {
+            id: { string: 'id' },
+            metadata: { type: 'event' },
+            data: Buffer.alloc(1024),
+            customMetadata: Buffer.alloc(0),
+          },
+        ],
+        isFinal: true,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(live).toBe(true);
+      expect(observed['activeWrites']).toBe(1);
+      expect(observed['retainedBytes']).toBeGreaterThanOrEqual(1024);
+      finishTransaction();
+      await tick();
+      expect(observed['activeWrites']).toBe(1);
+      finishCleanup();
+      await tick();
+      expect(observed['activeWrites']).toBe(0);
+      expect(observed['retainedBytes']).toBe(0);
+    } finally {
+      finishTransaction();
+      finishCleanup();
+      spy.mockRestore();
+    }
+  });
+  it('ignores batch fragments after cancellation before close', () => {
+    const batchAppend = jest.fn(() => Promise.resolve({}));
+    const controller = new StreamsController(
+      { batchAppend } as never,
+      stats as never,
+    );
+    const call = new Call();
+    controller.batchAppend(call as never);
+    call.emit('data', {
+      correlationId: { string: '00000000-0000-0000-0000-000000000001' },
+      isFinal: false,
+    });
+    call.emit('cancelled');
+    call.emit('data', {
+      correlationId: { string: '00000000-0000-0000-0000-000000000001' },
+      isFinal: true,
+    });
+    expect(batchAppend).not.toHaveBeenCalled();
+  });
   it.each(['delete', 'tombstone'] as const)(
     'cleans up unary %s listeners on backend failure',
     async (method) => {
@@ -104,7 +259,10 @@ describe('write context from gRPC streams', () => {
     );
     const call = new Call();
     controller.batchAppend(call as never);
-    call.emit('data', { correlationId: { string: 'a' }, isFinal: true });
+    call.emit('data', {
+      correlationId: { string: '00000000-0000-0000-0000-000000000001' },
+      isFinal: true,
+    });
     call.emit('end');
     const context = batchAppend.mock.calls[0][1] as {
       signal: AbortSignal;
@@ -152,7 +310,7 @@ describe('write context from gRPC streams', () => {
     controller.batchAppend(call as never);
     const deadline = Date.now() + 30000;
     call.emit('data', {
-      correlationId: { string: 'a' },
+      correlationId: { string: '00000000-0000-0000-0000-000000000001' },
       options: {
         deadline21100: {
           seconds: Math.floor(deadline / 1000),
@@ -186,7 +344,7 @@ describe('write context from gRPC streams', () => {
         const call = new Call();
         controller.batchAppend(call as never);
         call.emit('data', {
-          correlationId: { string: 'a' },
+          correlationId: { string: '00000000-0000-0000-0000-000000000001' },
           options: {
             [field]: {
               seconds: field === 'deadline' ? 1 : 1700000001,
@@ -196,7 +354,7 @@ describe('write context from gRPC streams', () => {
           isFinal: true,
         });
         call.emit('data', {
-          correlationId: { string: 'b' },
+          correlationId: { string: '00000000-0000-0000-0000-000000000002' },
           options: { deadline: { seconds: 2, nanos: 1000001 } },
           isFinal: true,
         });
@@ -235,12 +393,15 @@ describe('write context from gRPC streams', () => {
       call.deadline = Date.now() + 10000;
       controller.batchAppend(call as never);
       call.emit('data', {
-        correlationId: { string: 'a' },
+        correlationId: { string: '00000000-0000-0000-0000-000000000001' },
         options: { deadline: { seconds: 2, nanos: 0 } },
         isFinal: false,
       });
       jest.advanceTimersByTime(3000);
-      call.emit('data', { correlationId: { string: 'a' }, isFinal: true });
+      call.emit('data', {
+        correlationId: { string: '00000000-0000-0000-0000-000000000001' },
+        isFinal: true,
+      });
       const context = batchAppend.mock.calls[0][1] as {
         signal: AbortSignal;
         deadline: number;
@@ -259,7 +420,8 @@ describe('write context from gRPC streams', () => {
       Promise<never>,
       [{ correlationId: { string: string } }[], unknown]
     >((messages: { correlationId: { string: string } }[]) =>
-      messages[0].correlationId.string === 'alpha'
+      messages[0].correlationId.string ===
+      '00000000-0000-0000-0000-000000000003'
         ? alpha.promise
         : beta.promise,
     );
@@ -269,8 +431,14 @@ describe('write context from gRPC streams', () => {
     );
     const call = new Call();
     controller.batchAppend(call as never);
-    call.emit('data', { correlationId: { string: 'alpha' }, isFinal: true });
-    call.emit('data', { correlationId: { string: 'beta' }, isFinal: true });
+    call.emit('data', {
+      correlationId: { string: '00000000-0000-0000-0000-000000000003' },
+      isFinal: true,
+    });
+    call.emit('data', {
+      correlationId: { string: '00000000-0000-0000-0000-000000000004' },
+      isFinal: true,
+    });
     call.emit('end');
     const a = batchAppend.mock.calls[0][1] as { signal: AbortSignal };
     const b = batchAppend.mock.calls[1][1] as { signal: AbortSignal };

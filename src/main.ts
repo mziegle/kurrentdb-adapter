@@ -17,8 +17,88 @@ import {
 import { logHotPath } from './shared/debug-log';
 import { AdapterStatsService } from './operations/adapter-stats.service';
 import { appLogger } from './shared/logger';
+import { parseGrpcReceiveLimit } from './grpc-receive-limit';
+import { EventEmitter } from 'node:events';
+
+const proxySockets = new WeakMap<NetServer, Set<Socket>>();
+const proxyShutdowns = new WeakMap<NetServer, Promise<void>>();
+const proxyErrors = new WeakMap<
+  NetServer,
+  { failed: boolean; shutdown?: () => void }
+>();
+const PROXY_SHUTDOWN_GRACE_MS = 10000;
+
+export function shutdownProbeProxy(
+  server: NetServer,
+  graceMs = PROXY_SHUTDOWN_GRACE_MS,
+): Promise<void> {
+  const existing = proxyShutdowns.get(server);
+  if (existing) return existing;
+  const sockets = proxySockets.get(server);
+  if (!sockets) return Promise.reject(new Error('Not a probe proxy'));
+  let finish!: () => void;
+  const result = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  proxyShutdowns.set(server, result);
+  const timer = setTimeout(() => {
+    for (const socket of sockets) socket.destroy();
+    finish();
+  }, graceMs);
+  server.close(() => {
+    clearTimeout(timer);
+    // A half-closed upstream can outlive its client-side socket.
+    for (const socket of sockets) socket.destroy();
+    finish();
+  });
+  return result;
+}
+
+export function registerProxyShutdown(
+  server: NetServer,
+  app: { close: () => Promise<void> },
+  signals: EventEmitter = process,
+  graceMs = PROXY_SHUTDOWN_GRACE_MS,
+): () => void {
+  let shuttingDown = false;
+  const beginShutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    void shutdownProbeProxy(server, graceMs)
+      .then(() => app.close())
+      .catch(() => {
+        try {
+          appLogger.error('Application shutdown failed');
+        } catch {
+          /* best effort */
+        }
+        process.exitCode = 1;
+      });
+  };
+  const handler = () => {
+    if (shuttingDown && signals === process) process.exit(1);
+    beginShutdown();
+  };
+  const errorState = proxyErrors.get(server);
+  if (errorState) {
+    errorState.shutdown = beginShutdown;
+    if (errorState.failed) beginShutdown();
+  }
+  signals.on('SIGTERM', handler);
+  signals.on('SIGINT', handler);
+  return () => {
+    if (errorState?.shutdown === beginShutdown) delete errorState.shutdown;
+    signals.off('SIGTERM', handler);
+    signals.off('SIGINT', handler);
+  };
+}
 
 async function bootstrap() {
+  parseProxyMaxConnections(process.env.PROXY_MAX_CONNECTIONS);
+  parseProxyPrefaceTimeout(process.env.PROXY_PREFACE_TIMEOUT_MS);
+  const maxReceiveMessageLength = parseGrpcReceiveLimit(
+    process.env.GRPC_MAX_RECEIVE_MESSAGE_BYTES,
+  );
   const grpcUrl = process.env.GRPC_URL ?? '0.0.0.0:2113';
   const internalGrpcUrl =
     process.env.INTERNAL_GRPC_URL ?? deriveInternalGrpcUrl(grpcUrl);
@@ -29,6 +109,7 @@ async function bootstrap() {
     {
       transport: Transport.GRPC,
       options: {
+        maxReceiveMessageLength,
         url: internalGrpcUrl,
         package: [
           'event_store.client.gossip',
@@ -59,6 +140,7 @@ async function bootstrap() {
 
   const stats = app.get(AdapterStatsService);
   const proxyServer = await startProbeProxy(grpcUrl, internalGrpcUrl, stats);
+  registerProxyShutdown(proxyServer, app);
   const proxyAddress = proxyServer.address() as AddressInfo;
   appLogger.info(
     {
@@ -117,13 +199,43 @@ export async function startProbeProxy(
   internalGrpcUrl: string,
   stats: AdapterStatsService,
 ): Promise<NetServer> {
+  const maxConnections = parseProxyMaxConnections(
+    process.env.PROXY_MAX_CONNECTIONS,
+  );
+  const prefaceTimeout = parseProxyPrefaceTimeout(
+    process.env.PROXY_PREFACE_TIMEOUT_MS,
+  );
   const publicEndpoint = parseTcpEndpoint(publicGrpcUrl);
   const internalEndpoint = parseTcpEndpoint(internalGrpcUrl);
+  let connections = 0;
+  const sockets = new Set<Socket>();
+  const track = (socket: Socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  };
 
   const server = createServer({ allowHalfOpen: true }, (clientSocket) => {
+    track(clientSocket);
+    if (connections >= maxConnections) {
+      clientSocket.destroy();
+      return;
+    }
+    connections++;
+    clientSocket.once('close', () => connections--);
     const upstreamSocket = new Socket({ allowHalfOpen: true });
     let routed = false;
     let loggedFirstChunk = false;
+    const preface = Buffer.from('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n');
+    let matched = 0;
+    let prefacePossible = true;
+    const deadline =
+      prefaceTimeout === 0
+        ? undefined
+        : setTimeout(() => {
+            clientSocket.destroy();
+            upstreamSocket.destroy();
+          }, prefaceTimeout);
+    clientSocket.once('close', () => clearTimeout(deadline));
 
     const destroyBoth = () => {
       clientSocket.destroy();
@@ -131,6 +243,18 @@ export async function startProbeProxy(
     };
 
     clientSocket.on('data', (chunk: Buffer) => {
+      if (prefacePossible && matched < preface.length) {
+        for (const byte of chunk) {
+          if (byte !== preface[matched]) {
+            prefacePossible = false;
+            break;
+          }
+          if (++matched === preface.length) {
+            clearTimeout(deadline);
+            break;
+          }
+        }
+      }
       if (routed) return;
       if (!loggedFirstChunk) {
         loggedFirstChunk = true;
@@ -149,6 +273,7 @@ export async function startProbeProxy(
       }
 
       routed = true;
+      track(upstreamSocket);
       // Keep the first chunk in order and stop reading until it is accepted.
       clientSocket.pause();
       upstreamSocket.connect(
@@ -191,6 +316,21 @@ export async function startProbeProxy(
     });
   });
 
+  const errorState: { failed: boolean; shutdown?: () => void } = {
+    failed: false,
+  };
+  proxyErrors.set(server, errorState);
+  server.on('error', () => {
+    errorState.failed = true;
+    process.exitCode = 1;
+    try {
+      appLogger.error('Probe proxy server error');
+    } catch {
+      /* best effort */
+    }
+    errorState.shutdown?.();
+  });
+
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(publicEndpoint.port, publicEndpoint.host, () => {
@@ -199,7 +339,29 @@ export async function startProbeProxy(
     });
   });
 
+  proxySockets.set(server, sockets);
   return server;
+}
+
+function parseProxyPrefaceTimeout(value: string | undefined): number {
+  if (value === undefined) return 10000;
+  if (!/^(0|[1-9][0-9]*)$/.test(value))
+    throw new Error('Invalid PROXY_PREFACE_TIMEOUT_MS');
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > 2147483647)
+    throw new Error('Invalid PROXY_PREFACE_TIMEOUT_MS');
+  return parsed;
+}
+
+function parseProxyMaxConnections(value: string | undefined): number {
+  if (value === undefined) return 1024;
+  if (!/^[1-9][0-9]*$/.test(value))
+    throw new Error('Invalid PROXY_MAX_CONNECTIONS');
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > 100000) {
+    throw new Error('Invalid PROXY_MAX_CONNECTIONS');
+  }
+  return parsed;
 }
 
 function logProbeSocketError(message: string, error: Error): void {

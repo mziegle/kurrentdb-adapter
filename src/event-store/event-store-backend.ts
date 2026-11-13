@@ -35,6 +35,8 @@ export interface WriteRequestContext {
   signal: AbortSignal;
   /** Absolute Unix time in milliseconds, when finite. */
   deadline?: number;
+  /** Keep request storage owned until supplied work and cleanup settle. */
+  retainUntil?: (completion: Promise<void>) => void;
 }
 
 export interface EventStoreBackend {

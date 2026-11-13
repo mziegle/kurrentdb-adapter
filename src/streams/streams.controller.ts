@@ -348,12 +348,13 @@ export class StreamsController {
     });
     const session = new BatchAppendSession(
       call,
-      (requestGroup, enqueueResponse, startedAt) =>
+      (requestGroup, enqueueResponse, startedAt, retainUntil) =>
         this.handleBatchAppendGroup(
           call,
           requestGroup,
           enqueueResponse,
           startedAt,
+          retainUntil,
         ),
       (correlationId) => this.getBatchAppendCorrelationKey(correlationId),
       (error) => this.mapServiceError(error),
@@ -368,6 +369,9 @@ export class StreamsController {
     call.on('end', () => {
       session.onEnd();
     });
+    call.on('cancelled', () => {
+      session.onClose();
+    });
     call.on('close', () => {
       session.onClose();
     });
@@ -381,6 +385,7 @@ export class StreamsController {
     requestGroup: BatchAppendReq[],
     enqueueResponse: (response: BatchAppendResp) => Promise<void>,
     startedAt: number,
+    retainUntil: (completion: Promise<void>) => void,
   ): Promise<void> {
     const operation = this.stats.startOperation('batchAppend');
     const options = requestGroup.find((request) => request.options)?.options;
@@ -401,6 +406,7 @@ export class StreamsController {
         Math.floor(Number(time.nanos ?? 0) / 1_000_000)
       : undefined;
     const writeContext = createWriteContext(call, groupDeadline);
+    writeContext.context.retainUntil = retainUntil;
     try {
       let response: BatchAppendResp;
       try {
@@ -480,15 +486,67 @@ export class StreamsController {
   private getBatchAppendCorrelationKey(
     correlationId: BatchAppendReq['correlationId'],
   ): string {
-    if (correlationId?.string) {
-      return correlationId.string;
+    const invalid = () => new Error('Invalid batch append correlation id.');
+    if (
+      !correlationId ||
+      (correlationId.string !== undefined) ===
+        (correlationId.structured !== undefined)
+    )
+      throw invalid();
+    if (correlationId.string !== undefined) {
+      if (
+        typeof correlationId.string !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          correlationId.string,
+        )
+      )
+        throw invalid();
+      return correlationId.string.replace(/-/g, '').toLowerCase();
     }
-
-    if (correlationId?.structured) {
-      return `${correlationId.structured.mostSignificantBits}:${correlationId.structured.leastSignificantBits}`;
-    }
-
-    throw new Error('Batch append request must include a correlation id.');
+    const structured = correlationId.structured;
+    if (!structured || typeof structured !== 'object') throw invalid();
+    const bits = (value: unknown): string => {
+      let n: bigint;
+      if (value === undefined)
+        n = 0n; // Omitted proto3 scalar defaults to zero.
+      else if (typeof value === 'number' && Number.isSafeInteger(value))
+        n = BigInt(value);
+      else if (typeof value === 'bigint') n = value;
+      else if (
+        typeof value === 'string' &&
+        /^-?\d+$/.test(value) &&
+        value.length <= 20
+      )
+        n = BigInt(value);
+      else if (
+        value &&
+        typeof value === 'object' &&
+        'low' in value &&
+        'high' in value &&
+        'unsigned' in value
+      ) {
+        const { low, high, unsigned } = value;
+        if (
+          typeof low !== 'number' ||
+          typeof high !== 'number' ||
+          !Number.isInteger(low) ||
+          !Number.isInteger(high) ||
+          low < -2147483648 ||
+          low > 2147483647 ||
+          high < -2147483648 ||
+          high > 2147483647 ||
+          typeof unsigned !== 'boolean'
+        )
+          throw invalid();
+        n = (BigInt(high >>> 0) << 32n) | BigInt(low >>> 0);
+      } else throw invalid();
+      if (n < -(1n << 63n) || n >= 1n << 64n) throw invalid();
+      return BigInt.asUintN(64, n).toString(16).padStart(16, '0');
+    };
+    return (
+      bits(structured.mostSignificantBits) +
+      bits(structured.leastSignificantBits)
+    );
   }
 
   private mapServiceError(error: unknown): Error {

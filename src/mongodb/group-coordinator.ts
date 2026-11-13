@@ -1,4 +1,4 @@
-import { Batch } from './group-commit';
+import { Batch, BorrowedOwnership } from './group-commit';
 
 /**
  * Runner contract: invoke work serially for each full transaction attempt and
@@ -13,9 +13,13 @@ export async function executeGroup<T, R>(
   apply: (value: T) => Promise<R>,
   classify: (error: unknown) => 'aborted' | 'unknown' = () => 'unknown',
   cleanup: () => Promise<boolean> = () => Promise.resolve(true),
+  borrowedOwner?: BorrowedOwnership,
 ): Promise<void> {
-  const release = batch.retain();
+  if (borrowedOwner && !batch.ownsBorrow(borrowedOwner))
+    throw new Error('invalid borrowed owner');
+  const release = borrowedOwner ? undefined : batch.retain();
   let attempt = 0;
+  let cleaned = false;
   try {
     await transaction(async () => {
       attempt = batch.beginAttempt();
@@ -23,8 +27,16 @@ export async function executeGroup<T, R>(
         batch.stage(attempt, member, await apply(member.value));
     });
     if (!attempt) throw new Error('transaction did not execute callback');
+    if (borrowedOwner) {
+      cleaned = true;
+      await cleanup();
+    }
     batch.commit(attempt);
   } catch (error) {
+    if (borrowedOwner && !cleaned) {
+      cleaned = true;
+      await cleanup();
+    }
     // Shutdown may already have settled the batch as uncertain.
     if (!batch.members.length || batch.members[0].state !== 'settled') {
       try {
@@ -44,7 +56,7 @@ export async function executeGroup<T, R>(
     throw error;
   } finally {
     try {
-      if (await cleanup()) release();
+      if (!cleaned && (await cleanup())) release?.();
     } catch {
       // Unknown cleanup state retains accounting and cannot mask an outcome.
     }

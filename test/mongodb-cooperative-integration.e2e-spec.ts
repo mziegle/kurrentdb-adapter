@@ -4,7 +4,7 @@ import { GenericContainer, StartedTestContainer, Wait } from 'testcontainers';
 import { Batch } from '../src/mongodb/group-commit';
 import { CooperativeDispatcher } from '../src/mongodb/cooperative-dispatcher';
 import { TransactionAdmission } from '../src/mongodb/transaction-admission';
-import { runMongoGroup } from '../src/mongodb/group-runner';
+import { BorrowedOwnership, runMongoGroup } from '../src/mongodb/group-runner';
 import { MongoEventStoreService } from '../src/mongodb/mongodb-event-store.service';
 import { MongoInfrastructureService } from '../src/mongodb/mongodb-infrastructure.service';
 import { AppendReq } from '../src/interfaces/streams';
@@ -44,46 +44,18 @@ async function runBorrowed(
   client: MongoClient,
   batch: Batch<Request, Result>,
   apply: (value: Request, session: ClientSession) => Promise<Result>,
-): Promise<void> {
-  // The dispatcher owns the real hold. The coordinator's second hold is
-  // replaced only in this test harness; its release is a no-op.
-  const borrowed = new Proxy(batch, {
-    get(target, property) {
-      if (property === 'retain') return () => () => undefined;
-      const value: unknown = Reflect.get(target, property, target);
-      return (
-        typeof value === 'function' ? value.bind(target) : value
-      ) as unknown;
-    },
-  });
-  let cleaned = false;
-  const borrowedClient = new Proxy(client, {
-    get(target, property) {
-      if (property === 'startSession')
-        return () => {
-          const session = target.startSession();
-          const end = session.endSession.bind(session) as () => Promise<void>;
-          session.endSession = async () => {
-            await end();
-            cleaned = true;
-          };
-          return session;
-        };
-      const value: unknown = Reflect.get(target, property, target);
-      return (
-        typeof value === 'function' ? value.bind(target) : value
-      ) as unknown;
-    },
-  });
-  try {
-    await runMongoGroup(borrowedClient, borrowed, apply, {
+  ownership: BorrowedOwnership,
+) {
+  return runMongoGroup(
+    client,
+    batch,
+    apply,
+    {
       maxAttempts: 1,
       maxCommitAttempts: 1,
-    });
-  } catch (error) {
-    if (!cleaned) throw error;
-  }
-  if (!cleaned) throw new Error('session cleanup unconfirmed');
+    },
+    ownership,
+  );
 }
 
 describe('cooperative dispatcher Mongo integration', () => {
@@ -154,7 +126,7 @@ describe('cooperative dispatcher Mongo integration', () => {
       { maxRequests: 2, maxEvents: 2, maxBytes: 2 },
       0,
       (value) => value.stream,
-      async (finalize) => {
+      async (finalize, ownership) => {
         entered.release();
         const release = await mutex.acquire(1);
         const batch = finalize();
@@ -162,16 +134,21 @@ describe('cooperative dispatcher Mongo integration', () => {
           release();
           return;
         }
-        await runBorrowed(gatedClient, batch, (value, session) =>
-          adapter['appendGroupMember'](
-            session,
-            db,
-            value.options,
-            value.stream,
-            value.events,
-          ),
+        const outcome = await runBorrowed(
+          gatedClient,
+          batch,
+          (value, session) =>
+            adapter['appendGroupMember'](
+              session,
+              db,
+              value.options,
+              value.stream,
+              value.events,
+            ),
+          ownership(),
         );
-        release();
+        if (outcome.cleanup === 'complete') release();
+        return outcome;
       },
     );
     const controller = new AbortController();
@@ -217,19 +194,23 @@ describe('cooperative dispatcher Mongo integration', () => {
       { maxRequests: 4, maxEvents: 4, maxBytes: 4 },
       0,
       (value) => value.stream,
-      async (finalize) => {
+      async (finalize, ownership) => {
         entered.release();
         await admission.promise;
         const batch = finalize();
         if (!batch) return;
-        await runBorrowed(client, batch, (value, session) =>
-          adapter['appendGroupMember'](
-            session,
-            db,
-            value.options,
-            value.stream,
-            value.events,
-          ),
+        return runBorrowed(
+          client,
+          batch,
+          (value, session) =>
+            adapter['appendGroupMember'](
+              session,
+              db,
+              value.options,
+              value.stream,
+              value.events,
+            ),
+          ownership(),
         );
       },
     );
@@ -284,23 +265,28 @@ describe('cooperative dispatcher Mongo integration', () => {
       { maxRequests: 2, maxEvents: 2, maxBytes: 2 },
       0,
       (value) => value.stream,
-      async (finalize) => {
+      async (finalize, ownership) => {
         const batch = finalize();
         if (!batch) return;
-        await runBorrowed(client, batch, async (value, session) => {
-          session.once('ended', () => {
-            ended = true;
-          });
-          started.release();
-          await work.promise;
-          return adapter['appendGroupMember'](
-            session,
-            db,
-            value.options,
-            value.stream,
-            value.events,
-          );
-        });
+        return runBorrowed(
+          client,
+          batch,
+          async (value, session) => {
+            session.once('ended', () => {
+              ended = true;
+            });
+            started.release();
+            await work.promise;
+            return adapter['appendGroupMember'](
+              session,
+              db,
+              value.options,
+              value.stream,
+              value.events,
+            );
+          },
+          ownership(),
+        );
       },
     );
     const cancelled = dispatcher.enqueue(request('started'), 1, 1, {

@@ -69,7 +69,21 @@ The adapter also starts an internal Nest gRPC server, which defaults to:
 INTERNAL_GRPC_URL=127.0.0.1:2213
 ```
 
-The external listener acts as a lightweight TCP probe proxy in front of that internal gRPC server. It logs request and protocol information; at trace level it also logs raw first-chunk previews.
+The external listener acts as a lightweight TCP probe proxy in front of that internal gRPC server.
+
+`GRPC_MAX_RECEIVE_MESSAGE_BYTES` sets the maximum inbound gRPC message size on the internal server, before protobuf decoding. It defaults to 4,194,304 bytes (4 MiB) and can be lowered to a positive decimal integer; 4 MiB is also the hard maximum. Empty, zero, negative, malformed, and larger values fail startup. This applies per message to all RPCs, not per append or stream. The official Node client's default BatchAppend batch size is 3 MiB; the extra MiB allows protobuf framing overhead, but unusually large individual events or metadata can exceed the cap, and lowering it may require smaller client batches. Rejected streaming writes can have unknown outcomes; do not assume rollback. The client may fail unrelated pending BatchAppend promises on a stream error.
+
+This limit bounds individual received messages, not total process memory, connections, simultaneous RPCs, decompression overhead, or aggregate stream buffering. Deploy connection/rate limits and resource isolation separately; see [BatchAppend buffering limits](docs/batch-append-buffer-limits.md).
+
+### Public proxy connection bounds
+
+`PROXY_MAX_CONNECTIONS` defaults to 1024 concurrent accepted public TCP sockets (including probes and HTTP/2 connections); valid values are decimal integers from 1 to 100000. Excess sockets are immediately closed. A slot is released when the client socket closes. This is per process, not per IP, and includes long-lived subscriptions.
+
+`PROXY_PREFACE_TIMEOUT_MS` defaults to 10000 ms and accepts decimal integers from 0 to 2147483647; 0 disables it. It is an absolute deadline from acceptance, not reset by incoming bytes. It closes both sides unless the client sends the complete 24-byte plaintext HTTP/2 connection preface in time. This protects silent and slow partial-preface sockets, but also closes HTTP/1 or other non-HTTP/2 connections still open after the deadline; increase or disable it if required. Complete HTTP/2 prefaces disable this deadline even if no valid HTTP/2 session follows: a client can bypass the deadline simply by sending the preface. There is deliberately no established-connection idle timeout, so quiet subscriptions are not disconnected; the connection cap can still be exhausted by idle or malicious established clients. Neither setting is an authentication or rate limit. Invalid values fail startup without printing the supplied value.
+
+These limits apply only to the public proxy. Direct access to `INTERNAL_GRPC_URL` bypasses them completely. Use an external gateway and process supervision for additional connection, rate, and shutdown controls.
+
+On SIGTERM or SIGINT, the proxy stops accepting connections and allows existing connections a fixed 10-second grace period before destroying remaining client and upstream sockets. It does not send HTTP/2 GOAWAY, so existing connections can carry streams during that period. Normal Nest shutdown starts afterwards and is not bounded by the proxy deadline. Forced disconnects interrupt subscriptions; resume from a safely processed checkpoint. An interrupted or unacknowledged write has an unknown outcome and may already have committed; reconcile before retrying according to the application's idempotency rules. See [proxy shutdown](docs/proxy-shutdown.md).
 
 ### Security and deployment
 
@@ -77,7 +91,7 @@ The external listener acts as a lightweight TCP probe proxy in front of that int
 
 For a controlled deployment, bind `GRPC_URL` to loopback or a private interface and restrict access to trusted workloads using network isolation and a separately managed, authenticated TLS gateway that supports gRPC/HTTP2. Protect the gateway-to-adapter hop as well; the adapter itself speaks plaintext. Restrict database connectivity, use database authentication and TLS appropriate to the backend, manage credentials outside the repository, and replace the development PostgreSQL defaults. These controls are external to this project and are not verified by the adapter. The MongoDB backend remains experimental; see [its limitations](docs/mongodb.md).
 
-Logs may contain sensitive data. Trace logging includes request fields, event metadata, and raw proxy bytes (including HTTP headers or query strings); even non-trace logs can include unhandled HTTP request targets and client-supplied identifiers. Credential-name redaction and metadata allowlisting do not guarantee that secrets are absent. Avoid trace logging with sensitive data, restrict and retain logs appropriately, and do not put secrets in URLs or client-controlled identifiers.
+Logs may contain sensitive data. Trace logging can include request fields and event metadata. The proxy logs protocol and request metadata, not raw first-chunk previews, and omits unhandled HTTP request targets; other logs can include client-supplied identifiers. Credential-name redaction and metadata allowlisting do not guarantee that secrets are absent. Avoid trace logging with sensitive data, restrict and retain logs appropriately, and do not put secrets in URLs or client-controlled identifiers.
 
 ## Running The Adapter
 
