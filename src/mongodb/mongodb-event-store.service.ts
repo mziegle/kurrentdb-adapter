@@ -42,6 +42,7 @@ import { TransactionAdmission } from './transaction-admission';
 import { requestSize } from './request-size';
 import { runMongoGroup } from './group-runner';
 import { endOrdinarySession, OrdinaryCleanup } from './ordinary-cleanup';
+import { MongoSubscriptionNotifier } from './mongodb-subscription-notifier';
 
 type GroupRequest = {
   stream: string;
@@ -86,7 +87,7 @@ export class MongoEventStoreService implements EventStoreBackend {
   private shuttingDown = false;
   private readonly liveOrdinary = new Set<Promise<void>>();
   private readonly liveReads = new Set<Promise<void>>();
-  private readonly shutdownSignal = new AbortController();
+  private readonly subscriptionNotifier = new MongoSubscriptionNotifier();
   private closingClient?: Promise<void>;
 
   private readonly scavengeEnabled =
@@ -159,13 +160,22 @@ export class MongoEventStoreService implements EventStoreBackend {
 
   async onModuleInit(): Promise<void> {
     await this.infrastructure.connect();
+    try {
+      await this.subscriptionNotifier.start(
+        this.infrastructure
+          .getClient()
+          .db(this.infrastructure.getDatabaseName()),
+      );
+    } catch (error) {
+      await this.infrastructure.close();
+      throw error;
+    }
   }
   private shutdownResponse?: Promise<void>;
 
   onModuleDestroy(): Promise<void> {
     if (this.shutdownResponse) return this.shutdownResponse;
     this.shuttingDown = true;
-    this.shutdownSignal.abort();
     for (const scavenge of this.scavenges.values()) {
       scavenge.cancelled = true;
       scavenge.controller.abort();
@@ -180,6 +190,7 @@ export class MongoEventStoreService implements EventStoreBackend {
     const drained = Promise.all([
       groups,
       admission,
+      this.subscriptionNotifier.close(),
       ...this.liveOrdinary,
       ...this.liveReads,
       ...tasks,
@@ -271,21 +282,6 @@ export class MongoEventStoreService implements EventStoreBackend {
     const result = await work();
     if (!uncertain) cleanup.cleanup = 'complete';
     return result;
-  }
-
-  private async pollDelay(): Promise<void> {
-    if (this.shuttingDown) return;
-    await new Promise<void>((resolve) => {
-      const done = () => {
-        clearTimeout(timer);
-        this.shutdownSignal.signal.removeEventListener('abort', done);
-        resolve();
-      };
-      const timer = setTimeout(done, 100);
-      this.shutdownSignal.signal.addEventListener('abort', done, {
-        once: true,
-      });
-    });
   }
 
   private async admitted<T>(
@@ -910,6 +906,7 @@ export class MongoEventStoreService implements EventStoreBackend {
     yield { confirmation: { subscriptionId: randomUUID() } };
     let caughtUp = false;
     while (!this.shuttingDown && !isCancelled()) {
+      const observedVersion = this.subscriptionNotifier.observe();
       const rows = await this.trackRead(async (cleanup) => {
         const cursor = events
           .find({ ...filter, position: { $gt: position } })
@@ -929,7 +926,7 @@ export class MongoEventStoreService implements EventStoreBackend {
         yield { caughtUp: { timestamp: createTimestamp() } };
         caughtUp = true;
       }
-      await this.pollDelay();
+      await this.subscriptionNotifier.waitForChange(observedVersion);
     }
   }
 
@@ -978,6 +975,7 @@ export class MongoEventStoreService implements EventStoreBackend {
     yield { confirmation: { subscriptionId: randomUUID() } };
     let caughtUp = false;
     while (!this.shuttingDown && !isCancelled()) {
+      const observedVersion = this.subscriptionNotifier.observe();
       const batch = await this.trackRead(async (cleanup) => {
         const session = this.infrastructure.getClient().startSession();
         cleanup.cleanup = 'unconfirmed';
@@ -1066,7 +1064,7 @@ export class MongoEventStoreService implements EventStoreBackend {
         };
         caughtUp = true;
       }
-      await this.pollDelay();
+      await this.subscriptionNotifier.waitForChange(observedVersion);
     }
   }
   async delete(
