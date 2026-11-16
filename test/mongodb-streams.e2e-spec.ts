@@ -794,6 +794,30 @@ describe('MongoDB backend through the official client', () => {
     expect(backward).toEqual(['all-two', 'all-one']);
   });
 
+  it('reads ordinary events when link resolution is requested', async () => {
+    const stream = 'resolve-ordinary-events';
+    const appended = await client.appendToStream(
+      stream,
+      jsonEvent({ type: 'ordinary', data: { value: 1 } }),
+    );
+    const named: string[] = [];
+    for await (const { event } of client.readStream(stream, {
+      resolveLinkTos: true,
+    })) {
+      if (event) named.push(event.type);
+    }
+    const all: string[] = [];
+    for await (const { event } of client.readAll({
+      fromPosition: appended.position!,
+      maxCount: 1,
+      resolveLinkTos: true,
+    })) {
+      if (event) all.push(event.type);
+    }
+    expect(named).toEqual(['ordinary']);
+    expect(all).toEqual(['ordinary']);
+  });
+
   it('does not emit a tombstone as a normal event during a subscription race', async () => {
     const stream = 'mongo-subscribe-tombstone-race';
     await client.appendToStream(stream, jsonEvent({ type: 'old', data: {} }));

@@ -41,6 +41,25 @@ More scavenging detail is documented in [docs/scavenging.md](docs/scavenging.md)
 
 PostgreSQL is the default. For the experimental MongoDB backend, its configuration, unsafe opt-ins and restrictions, see [MongoDB safety notes](docs/mongodb.md). Experimental group commit is default-off and does not provide production-ready multi-instance operation.
 
+Start the local single-node MongoDB replica set and wait until it is primary:
+
+```bash
+npm run mongodb:up
+```
+
+Then run the adapter against it:
+
+```bash
+EVENT_STORE_BACKEND=mongodb \
+MONGODB_URI='mongodb://localhost:27017/?replicaSet=rs0&directConnection=true' \
+MONGODB_DATABASE=kurrentdb_adapter \
+npm run start:dev
+```
+
+The Compose setup persists data in the `mongodb-data` volume. `docker compose
+down` stops it without deleting data; add `--volumes` only when intentionally
+discarding the local databases.
+
 Use either `POSTGRES_URL`:
 
 ```bash

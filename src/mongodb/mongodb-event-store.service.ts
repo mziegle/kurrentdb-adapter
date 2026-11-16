@@ -656,8 +656,8 @@ export class MongoEventStoreService implements EventStoreBackend {
       toNumber(options.all.position.commitPosition ?? 0);
       toNumber(options.all.position.preparePosition ?? 0);
     }
-    if (options.resolveLinks || (options.filter && !options.all))
-      return unsupported('link resolution or filtered stream reads');
+    if (options.filter && !options.all)
+      return unsupported('filtered stream reads');
     if (options.all) {
       const backwards = isBackwardsRead(options.readDirection);
       const boundary = options.all.position
@@ -679,9 +679,16 @@ export class MongoEventStoreService implements EventStoreBackend {
       const rows = await this.readCursor(cursor, cleanup, () =>
         cursor.toArray(),
       );
-      return rows.length
-        ? rows.map((row) => this.mapRow(row))
-        : [{ caughtUp: { timestamp: undefined } }];
+      if (
+        options.resolveLinks &&
+        rows.some(
+          (row) =>
+            (row.metadata as Record<string, unknown> | undefined)?.type ===
+            '$>',
+        )
+      )
+        return unsupported('link resolution');
+      return rows.map((row) => this.mapRow(row));
     }
     if (!options.stream?.streamIdentifier?.streamName)
       return unsupported('reads other than individual streams or $all');
@@ -744,6 +751,15 @@ export class MongoEventStoreService implements EventStoreBackend {
           const rows = await this.readCursor(cursor, cursorCleanup, () =>
             cursor.toArray(),
           );
+          if (
+            options.resolveLinks &&
+            rows.some(
+              (row) =>
+                (row.metadata as Record<string, unknown> | undefined)?.type ===
+                '$>',
+            )
+          )
+            return unsupported('link resolution');
           return rows.map((row) => this.mapRow(row));
         },
         { readConcern: { level: 'snapshot' } },
@@ -806,8 +822,41 @@ export class MongoEventStoreService implements EventStoreBackend {
   private toBuffer(value: Binary | Buffer): Buffer {
     return Buffer.isBuffer(value) ? value : Buffer.from(value.buffer);
   }
-  getStatsSnapshot(): Promise<EventStoreStatsSnapshot> {
-    return unsupported('statistics');
+  async getStatsSnapshot(): Promise<EventStoreStatsSnapshot> {
+    return this.trackRead(async () => {
+      const db = this.infrastructure
+        .getClient()
+        .db(this.infrastructure.getDatabaseName());
+      const events = db.collection('stream_events');
+      const streams = db.collection('streams');
+      const [
+        totalEvents,
+        streamCount,
+        tombstonedStreamCount,
+        retentionPolicyCount,
+        latest,
+      ] = await Promise.all([
+        events.countDocuments(),
+        streams.countDocuments(),
+        streams.countDocuments({ tombstoned: true }),
+        db.collection('retention').countDocuments(),
+        events.findOne(
+          {},
+          { sort: { position: -1 }, projection: { position: 1 } },
+        ),
+      ]);
+      return {
+        activeScavenges: this.scavenges.size,
+        currentGlobalPosition: latest ? safeInteger(latest.position) : 0,
+        pgPoolIdleCount: 0,
+        pgPoolTotalCount: 0,
+        pgPoolWaitingCount: 0,
+        retentionPolicyCount,
+        streamCount,
+        tombstonedStreamCount,
+        totalEvents,
+      };
+    });
   }
   async batchAppend(
     requests: BatchAppendReq[],

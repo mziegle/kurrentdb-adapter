@@ -23,6 +23,7 @@
     "start:prod": "node dist/src/main",
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose down",
+    "mongodb:up": "docker compose up -d --wait mongodb",
     "kurrentdb:up": "docker compose up -d kurrentdb",
     "dev:up": "docker compose up -d postgres kurrentdb",
     "dev:down": "docker compose down",
