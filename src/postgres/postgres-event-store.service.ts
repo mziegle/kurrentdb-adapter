@@ -1359,7 +1359,9 @@ export class PostgresEventStoreService
       filter,
       eventsAlias,
     );
-    const prefixes = expression.prefix.filter((prefix) => prefix.length > 0);
+    const prefixes = (expression.prefix ?? []).filter(
+      (prefix) => prefix.length > 0,
+    );
 
     if (prefixes.length > 0) {
       const likePredicates = prefixes.map((prefix) => {

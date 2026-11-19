@@ -776,7 +776,9 @@ export class MongoEventStoreService implements EventStoreBackend {
       throw new Error(
         'Read filters must target a stream identifier or event type.',
       );
-    const prefixes = expression.prefix.filter((prefix) => prefix.length > 0);
+    const prefixes = (expression.prefix ?? []).filter(
+      (prefix) => prefix.length > 0,
+    );
     const pattern = prefixes.length
       ? `^(?:${prefixes.map((prefix) => prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`
       : expression.regex;
