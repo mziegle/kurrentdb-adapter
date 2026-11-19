@@ -77,6 +77,10 @@ function unsupported(operation: string): never {
   );
 }
 
+function isLinkRow(row: Document): boolean {
+  return (row.metadata as Record<string, unknown> | undefined)?.type === '$>';
+}
+
 export class MongoEventStoreService implements EventStoreBackend {
   private readonly infrastructure: MongoInfrastructureService;
   private readonly groupDispatcher?: CooperativeDispatcher<
@@ -944,6 +948,7 @@ export class MongoEventStoreService implements EventStoreBackend {
       toNumber(options.all.position.commitPosition ?? 0);
       toNumber(options.all.position.preparePosition ?? 0);
     }
+    const resolveLinks = options.resolveLinks === true;
     let position = options.all?.position
       ? toNumber(options.all.position.commitPosition ?? 0)
       : -1;
@@ -968,6 +973,8 @@ export class MongoEventStoreService implements EventStoreBackend {
       if (rows.length) {
         for (const row of rows) {
           if (this.shuttingDown || isCancelled()) return;
+          if (resolveLinks && isLinkRow(row))
+            return unsupported('link resolution in $all subscriptions');
           position = safeInteger(row.position);
           yield this.mapRow(row);
         }
@@ -988,21 +995,17 @@ export class MongoEventStoreService implements EventStoreBackend {
     if (this.shuttingDown) throw new GroupDispatchError('closed');
     const options = request.options;
     if (options?.all) {
-      if (options.resolveLinks || isBackwardsRead(options.readDirection))
-        return unsupported(
-          'filtered, backwards or link-resolving subscriptions',
-        );
+      if (isBackwardsRead(options.readDirection))
+        return unsupported('backwards $all subscriptions');
       yield* this.subscribeToAll(options, isCancelled);
       return;
     }
     if (!options?.stream?.streamIdentifier?.streamName)
       return unsupported('$all subscriptions');
-    if (
-      options.resolveLinks ||
-      options.filter ||
-      isBackwardsRead(options.readDirection)
-    )
-      return unsupported('filtered, backwards or link-resolving subscriptions');
+    if (options.filter)
+      return unsupported('filters on individual-stream subscriptions');
+    if (isBackwardsRead(options.readDirection))
+      return unsupported('backwards stream subscriptions');
     const streamName = decodeStreamName(
       options.stream.streamIdentifier.streamName,
     );
@@ -1101,6 +1104,8 @@ export class MongoEventStoreService implements EventStoreBackend {
       if (rows.length) {
         for (const row of rows) {
           if (this.shuttingDown || isCancelled()) return;
+          if (options.resolveLinks && isLinkRow(row))
+            return unsupported('link resolution in stream subscriptions');
           lastRevision = safeInteger(row.revision);
           yield this.mapRow(row);
         }
